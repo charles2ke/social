@@ -11,5 +11,5 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": { "@social/core": "workspace:*", "fastify": "5.2.1" },
-  "devDependencies": { "@prisma/client": "6.2.1", "prisma": "6.2.1", "tsx": "4.19.2" }
+  "devDependencies": { "tsx": "4.19.2" }
 }

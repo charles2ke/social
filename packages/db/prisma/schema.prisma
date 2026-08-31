@@ -1,0 +1,129 @@
+// Prisma schema for the Social Media Manager persistence layer.
+//
+// Provider is intentionally PostgreSQL only — see docs/adr/0001-database.md
+// for the reasoning (least-privilege roles, MVCC concurrency for the
+// scheduler claim-loop via `SELECT ... FOR UPDATE SKIP LOCKED`, native
+// JSONB/enum/TIMESTAMPTZ types).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// One of the 9 supported social platforms.
+enum Platform {
+  INSTAGRAM
+  FACEBOOK
+  WHATSAPP
+  LINKEDIN
+  SUBSTACK
+  YOUTUBE
+  SNAPCHAT
+  TIKTOK
+  STRAVA
+}
+
+enum PostStatus {
+  DRAFT
+  SCHEDULED
+  PUBLISHING
+  PUBLISHED
+  FAILED
+  CANCELLED
+}
+
+enum PublishStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+/// A connected social account. OAuth tokens are stored app-layer-encrypted
+/// (AES-256-GCM) in OAuthToken; this table only stores identifying info.
+model Account {
+  id          String     @id @default(cuid())
+  platform    Platform
+  displayName String     @map("display_name")
+  externalId  String     @map("external_id")
+  createdAt   DateTime   @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt   DateTime   @updatedAt @map("updated_at") @db.Timestamptz
+
+  token       OAuthToken?
+  attempts    PlatformPublishAttempt[]
+  analytics   AnalyticsSnapshot[]
+
+  @@unique([platform, externalId])
+  @@map("accounts")
+}
+
+/// OAuth refresh/access tokens. Values are AES-256-GCM ciphertext produced by
+/// the application layer — Postgres never sees plaintext tokens.
+model OAuthToken {
+  id                    String    @id @default(cuid())
+  accountId             String    @unique @map("account_id")
+  account               Account   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  encryptedAccessToken  String    @map("encrypted_access_token")
+  encryptedRefreshToken String?   @map("encrypted_refresh_token")
+  expiresAt             DateTime? @map("expires_at") @db.Timestamptz
+  createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt             DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@map("oauth_tokens")
+}
+
+/// A cross-platform post draft/scheduled item. `claimedBy`/`claimedAt` back
+/// the scheduler's `SELECT ... FOR UPDATE SKIP LOCKED` claim-loop so that
+/// multiple worker instances can safely publish without double-posting.
+model Post {
+  id                String     @id @default(cuid())
+  content           String
+  mediaUrls         Json?      @map("media_urls") @db.JsonB
+  platformOverrides Json?      @map("platform_overrides") @db.JsonB
+  status            PostStatus @default(DRAFT)
+  scheduledFor      DateTime?  @map("scheduled_for") @db.Timestamptz
+  claimedAt         DateTime?  @map("claimed_at") @db.Timestamptz
+  claimedBy         String?    @map("claimed_by")
+  createdAt         DateTime   @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt         DateTime   @updatedAt @map("updated_at") @db.Timestamptz
+
+  attempts          PlatformPublishAttempt[]
+
+  @@index([status, scheduledFor])
+  @@map("posts")
+}
+
+/// One publish attempt of a Post to a specific Account/platform.
+model PlatformPublishAttempt {
+  id             String        @id @default(cuid())
+  postId         String        @map("post_id")
+  post           Post          @relation(fields: [postId], references: [id], onDelete: Cascade)
+  accountId      String        @map("account_id")
+  account        Account       @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  platform       Platform
+  status         PublishStatus @default(PENDING)
+  externalPostId String?       @map("external_post_id")
+  error          String?
+  attemptedAt    DateTime      @default(now()) @map("attempted_at") @db.Timestamptz
+  completedAt    DateTime?     @map("completed_at") @db.Timestamptz
+
+  @@index([postId])
+  @@index([accountId])
+  @@map("platform_publish_attempts")
+}
+
+/// Cached analytics payloads polled per platform/account.
+model AnalyticsSnapshot {
+  id         String   @id @default(cuid())
+  accountId  String   @map("account_id")
+  account    Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  platform   Platform
+  metrics    Json     @db.JsonB
+  capturedAt DateTime @default(now()) @map("captured_at") @db.Timestamptz
+
+  @@index([accountId, capturedAt])
+  @@map("analytics_snapshots")
+}

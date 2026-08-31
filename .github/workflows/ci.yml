@@ -1,16 +1,42 @@
 name: CI
+
 on: [push, pull_request]
+
 permissions:
   contents: read
+
 jobs:
   verify:
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: social
+          POSTGRES_DB: social
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U social -d social"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://social@localhost:5432/social
+
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: pnpm }
       - run: pnpm install --frozen-lockfile
+      - name: Generate Prisma client
+        run: pnpm --filter @social/db run generate
+      - name: Apply migrations
+        run: pnpm --filter @social/db exec prisma migrate deploy
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
