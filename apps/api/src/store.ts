@@ -1,6 +1,5 @@
-import type { Account, OAuthToken, Post } from "@social/db";
+import { getPrismaClient, toPrismaPlatform, type Account, type OAuthToken, type Post } from "@social/db";
 import { encrypt, type PlatformId, type PostDraft } from "@social/core";
-import { getPrismaClient, toPrismaPlatform } from "@social/db";
 
 export type Draft = PostDraft & { id: string; createdAt: string };
 export type AccountSummary = {

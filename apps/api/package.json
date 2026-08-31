@@ -6,7 +6,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/apps/api/src/index.js",
     "build": "tsc -p tsconfig.json",
-    "lint": "eslint src",
+    "lint": "eslint src test",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests"
   },
