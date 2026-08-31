@@ -143,7 +143,7 @@ The export is opt-in: `apps/web/next.config.mjs` only sets Next.js'
 reproduce the published site locally:
 
 ```bash
-NEXT_STATIC_EXPORT=true NEXT_BASE_PATH=/social pnpm --filter @social/web run build
+NEXT_STATIC_EXPORT=true NEXT_BASE_PATH=/social corepack pnpm --filter @social/web run build
 ```
 
 The result lands in `apps/web/out`. Because Pages serves static files only,
