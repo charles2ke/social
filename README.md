@@ -2,6 +2,15 @@
 
 AGPL-3.0 self-hosted social-media manager with a Next.js dashboard, Fastify API, and MCP server.
 
+**Live demo: https://charles2ke.github.io/social/** — a static export of the
+dashboard published automatically from `main` (see "Deploying the demo to
+GitHub Pages"). It is UI-only: there is no API or database behind it, so
+publishing does nothing.
+
+| Dashboard | Composing a cross-platform post |
+| --- | --- |
+| ![Social dashboard](docs/screenshots/dashboard.png) | ![Compose form with platforms selected](docs/screenshots/compose.png) |
+
 ```text
 Web (apps/web) ──► API (apps/api) ──► Core adapters/scheduler (packages/core)
 MCP stdio server ───────────────────► Core adapters/scheduler
@@ -119,3 +128,24 @@ Use this in `claude_desktop_config.json` or VS Code MCP settings after
 `corepack pnpm lint`, `typecheck`, `test`, and `build` validate all workspaces.
 The scheduler persists per-platform results (including errors), and its queue
 supports cancellation and retries through the API/MCP surface.
+
+### Deploying the demo to GitHub Pages
+
+`.github/workflows/pages.yml` builds `apps/web` as a static export and
+publishes it to GitHub Pages on every push to `main` (and on demand via
+*Run workflow*). Enable it once per fork under **Settings → Pages → Build
+and deployment → Source: GitHub Actions**.
+
+The export is opt-in: `apps/web/next.config.mjs` only sets Next.js'
+`output: "export"` when `NEXT_STATIC_EXPORT=true`, and prefixes assets with
+`NEXT_BASE_PATH` (the workflow passes `/<repository>` for project Pages), so
+`pnpm dev` and self-hosted deployments keep the normal server build. To
+reproduce the published site locally:
+
+```bash
+NEXT_STATIC_EXPORT=true NEXT_BASE_PATH=/social pnpm --filter @social/web run build
+```
+
+The result lands in `apps/web/out`. Because Pages serves static files only,
+the deployed dashboard has no API to call — run the full stack locally or
+self-host it for a working install.

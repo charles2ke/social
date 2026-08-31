@@ -8,3 +8,4 @@ coverage/
 
 # Prisma generated client output (regenerated via `pnpm db:generate`)
 packages/*/generated/
+out/
