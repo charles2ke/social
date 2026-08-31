@@ -13,21 +13,23 @@
 -- README.md "Least-privilege worker role" for how to point the scheduler
 -- at this role via WORKER_DATABASE_URL.
 --
--- NOTE: the password below is a local-dev-only placeholder. Production
--- deployments must set a strong, secret-managed password (e.g. via
--- ALTER ROLE ... PASSWORD, applied out-of-band, never committed).
-
 DO
 $$
 BEGIN
   IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'social_worker') THEN
-    CREATE ROLE social_worker WITH LOGIN PASSWORD 'change-me-in-production';
+    -- A production password must be managed out of band, never committed.
+    CREATE ROLE social_worker WITH LOGIN;
   END IF;
 END
 $$;
 
 -- Allow the role to connect and use the schema, but grant nothing by default.
-GRANT CONNECT ON DATABASE social TO social_worker;
+DO
+$$
+BEGIN
+  EXECUTE format('GRANT CONNECT ON DATABASE %I TO social_worker', current_database());
+END
+$$;
 GRANT USAGE ON SCHEMA public TO social_worker;
 
 -- Scheduler needs full read/write on the job queue tables it owns the
