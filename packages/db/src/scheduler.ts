@@ -49,7 +49,10 @@ export async function claimDuePosts(
         },
       });
 
-      return tx.post.findMany({ where: { id: { in: ids } } });
+      return tx.post.findMany({
+        where: { id: { in: ids } },
+        orderBy: { scheduledFor: "asc" },
+      });
     },
     {
       isolationLevel: "ReadCommitted",
