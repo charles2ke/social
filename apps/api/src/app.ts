@@ -51,7 +51,7 @@ export function buildApp(): FastifyInstance {
       return results;
     } catch (error) {
       await prisma.post.update({ where: { id: post.id }, data: { status: "FAILED" } });
-      throw error;
+      return reply.code(500).send({ error: "Failed to publish post" });
     }
   });
   return app;
