@@ -1,0 +1,20 @@
+{
+  "name": "social",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Social Media Manager monorepo",
+  "license": "AGPL-3.0",
+  "packageManager": "pnpm@9.15.9",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "lint": "pnpm -r --if-present run lint",
+    "typecheck": "pnpm -r --if-present run typecheck",
+    "test": "pnpm -r --if-present run test",
+    "build": "pnpm -r --if-present run build",
+    "db:generate": "pnpm --filter @social/db run generate",
+    "db:migrate": "pnpm --filter @social/db run migrate",
+    "db:studio": "pnpm --filter @social/db run studio"
+  }
+}
