@@ -1,7 +1,10 @@
 node_modules/
 dist/
+.next/
 .env
 *.log
+*.db
+coverage/
 
 # Prisma generated client output (regenerated via `pnpm db:generate`)
 packages/*/generated/

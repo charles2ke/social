@@ -1,15 +1,12 @@
 name: CI
 
-on:
-  push:
-    branches: [main]
-  pull_request:
+on: [push, pull_request]
 
 permissions:
   contents: read
 
 jobs:
-  ci:
+  verify:
     runs-on: ubuntu-latest
 
     services:
@@ -32,33 +29,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
       - uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
       - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
       - name: Generate Prisma client
         run: pnpm --filter @social/db run generate
-
       - name: Apply migrations
         run: pnpm --filter @social/db exec prisma migrate deploy
-
-      - name: Lint
-        run: pnpm run lint
-
-      - name: Typecheck
-        run: pnpm run typecheck
-
-      - name: Test
-        run: pnpm run test
-
-      - name: Build
-        run: pnpm run build
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build

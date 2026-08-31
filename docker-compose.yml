@@ -1,8 +1,7 @@
-# Database layer only. This branch's app scaffold (apps/web, MCP server,
-# etc.) is being built out separately — once those services exist, add
-# `depends_on: { postgres: { condition: service_healthy } }` to each of
-# them so `docker compose up` remains a single-command start with no
-# manual DB setup. See docs/adr/0001-database.md and README.md.
+# `docker compose up` is a single-command start: Postgres boots first (with
+# packages/db/prisma/init/*.sql applied automatically to create the
+# least-privilege social_worker role), then the app waits for it to report
+# healthy before starting. See docs/adr/0001-database.md and README.md.
 
 services:
   postgres:
@@ -26,23 +25,15 @@ services:
       timeout: 5s
       retries: 10
 
-  # Example of how an app service should be wired once it exists:
-  #
-  # web:
-  #   build: ./apps/web
-  #   environment:
-  #     DATABASE_URL: postgresql://${POSTGRES_USER:-social}@postgres:5432/${POSTGRES_DB:-social}
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #
-  # mcp-server:
-  #   build: ./apps/mcp-server
-  #   environment:
-  #     DATABASE_URL: postgresql://${POSTGRES_USER:-social}@postgres:5432/${POSTGRES_DB:-social}
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
+  social:
+    build: .
+    ports: ["3000:3000", "3001:3001"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-social}@postgres:5432/${POSTGRES_DB:-social}
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   postgres_data:
