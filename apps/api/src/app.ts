@@ -17,6 +17,9 @@ export function buildApp(): FastifyInstance {
   });
   app.post<{ Body: { text: string; platforms: PlatformId[]; mediaUrls?: string[] } }>("/publish", async (request, reply) => {
     const { platforms, ...draft } = request.body;
+    if (!Array.isArray(platforms)) return reply.code(400).send({ error: "Invalid platforms: platforms is required and must be an array" });
+    const invalidPlatforms = platforms.filter((platform) => !(platform in adapters));
+    if (invalidPlatforms.length > 0) return reply.code(400).send({ error: `Invalid platforms: ${invalidPlatforms.join(", ")}` });
     // Resolve a real, per-account decrypted access token for each target
     // platform (never a single global token) — see
     // docs/adr/0001-database.md and packages/db/src/tokens.ts. MOCK_MODE

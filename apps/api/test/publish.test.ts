@@ -72,4 +72,14 @@ describe("POST /publish", () => {
     expect(response.json().error).toContain("linkedin");
     await app.close();
   });
+
+  it("returns 400 when an unsupported platform is provided", async () => {
+    process.env.MOCK_MODE = "true";
+
+    const app = buildApp();
+    const response = await app.inject({ method: "POST", url: "/publish", payload: { text: "hello", platforms: ["linkedin", "not-a-platform"] } });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toContain("not-a-platform");
+    await app.close();
+  });
 });
