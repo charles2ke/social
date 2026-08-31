@@ -15,8 +15,9 @@ app.post<{ Params: { id: string }; Body: { text?: string; mediaUrls?: string[] }
 app.post<{ Body: { text: string; platforms: PlatformId[]; mediaUrls?: string[] } }>("/publish", async (request, reply) => {
   const accessToken = process.env.MOCK_MODE === "true" ? "mock" : process.env.SOCIAL_ACCESS_TOKEN;
   if (!accessToken) return reply.code(401).send({ error: "No connected account token is available" });
-  return Promise.all(request.body.platforms.map(async (platform) => {
-    const adapter = adapters[platform]; return { platform, ...(await adapter.publish({ accessToken }, request.body)) };
+  const { platforms, ...draft } = request.body;
+  return Promise.all(platforms.map(async (platform) => {
+    const adapter = adapters[platform]; return { platform, ...(await adapter.publish({ accessToken }, draft)) };
   }));
 });
 app.listen({ port: Number(process.env.API_PORT ?? 3001), host: "0.0.0.0" }).catch((error: unknown) => { console.error(error); process.exit(1); });
