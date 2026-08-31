@@ -10,6 +10,6 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests"
   },
-  "dependencies": { "@social/core": "workspace:*", "fastify": "5.2.1" },
-  "devDependencies": { "tsx": "4.19.2" }
+  "dependencies": { "@social/core": "workspace:*", "@social/db": "workspace:*", "fastify": "5.2.1" },
+  "devDependencies": { "tsx": "4.19.2", "pg": "^8.23.0" }
 }

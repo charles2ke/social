@@ -35,10 +35,16 @@ importers:
       '@social/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@social/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       fastify:
         specifier: 5.2.1
         version: 5.2.1
     devDependencies:
+      pg:
+        specifier: ^8.23.0
+        version: 8.23.0
       tsx:
         specifier: 4.19.2
         version: 4.19.2
@@ -100,9 +106,16 @@ importers:
       '@social/core':
         specifier: workspace:*
         version: link:../core
+      '@social/db':
+        specifier: workspace:*
+        version: link:../db
       zod:
         specifier: 3.25.76
         version: 3.25.76
+    devDependencies:
+      pg:
+        specifier: ^8.23.0
+        version: 8.23.0
 
 packages:
 
