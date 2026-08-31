@@ -1,0 +1,12 @@
+{
+  "name": "@social/core",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": "./dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint src test",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  }
+}

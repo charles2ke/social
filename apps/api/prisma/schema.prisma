@@ -1,0 +1,24 @@
+generator client { provider = "prisma-client-js" }
+datasource db { provider = "sqlite" url = env("DATABASE_URL") }
+
+model Account {
+  id             String   @id @default(cuid())
+  platform       String
+  profileName    String
+  encryptedToken String
+  expiresAt      DateTime?
+  createdAt      DateTime @default(now())
+  posts          Post[]
+}
+
+model Post {
+  id           String   @id @default(cuid())
+  text         String
+  mediaUrls    String   @default("[]")
+  scheduledFor DateTime?
+  status       String   @default("pending")
+  error        String?
+  accountId    String?
+  account      Account? @relation(fields: [accountId], references: [id])
+  createdAt    DateTime @default(now())
+}
