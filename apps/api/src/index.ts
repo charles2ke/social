@@ -10,7 +10,11 @@ app.post<{ Body: { text: string; mediaUrls?: string[] } }>("/drafts", async (req
 app.post<{ Params: { id: string }; Body: { text?: string; mediaUrls?: string[] } }>("/drafts/:id", async (request, reply) => {
   const draft = store.updateDraft(request.params.id, request.body); return draft ? draft : reply.code(404).send({ error: "Draft not found" });
 });
-app.post<{ Body: { text: string; platforms: PlatformId[]; mediaUrls?: string[] } }>("/publish", async (request) => Promise.all(request.body.platforms.map(async (platform) => {
-  const adapter = adapters[platform]; return { platform, ...(await adapter.publish({ accessToken: "mock" }, request.body)) };
-})));
+app.post<{ Body: { text: string; platforms: PlatformId[]; mediaUrls?: string[] } }>("/publish", async (request, reply) => {
+  const accessToken = process.env.MOCK_MODE === "true" ? "mock" : process.env.SOCIAL_ACCESS_TOKEN;
+  if (!accessToken) return reply.code(401).send({ error: "No connected account token is available" });
+  return Promise.all(request.body.platforms.map(async (platform) => {
+    const adapter = adapters[platform]; return { platform, ...(await adapter.publish({ accessToken }, request.body)) };
+  }));
+});
 app.listen({ port: Number(process.env.API_PORT ?? 3001), host: "0.0.0.0" }).catch((error: unknown) => { console.error(error); process.exit(1); });
