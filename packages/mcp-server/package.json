@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "bin": { "social-mcp": "./dist/mcp-server/src/index.js" },
-  "scripts": { "build": "tsc -p tsconfig.json", "lint": "eslint src", "typecheck": "tsc -p tsconfig.json --noEmit", "test": "vitest run --passWithNoTests" },
-  "dependencies": { "@modelcontextprotocol/sdk": "1.12.0", "@social/core": "workspace:*", "zod": "3.25.76" }
+  "scripts": { "build": "tsc -p tsconfig.json", "lint": "eslint src test", "typecheck": "tsc -p tsconfig.json --noEmit", "test": "vitest run --passWithNoTests" },
+  "dependencies": { "@modelcontextprotocol/sdk": "1.12.0", "@social/core": "workspace:*", "@social/db": "workspace:*", "zod": "3.25.76" },
+  "devDependencies": { "pg": "^8.23.0" }
 }

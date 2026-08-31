@@ -43,12 +43,17 @@ The Prisma schema, migrations, and scheduler claim-loop live in
 ### Running tests
 
 ```bash
-pnpm test
+pnpm build && pnpm test
 ```
 
-Each test file in `packages/db` gets its own throwaway Postgres schema
-(see `packages/db/test/setup.ts`), so tests can run against any bare
-Postgres instance — including the one started by
+`apps/api` and `packages/mcp-server` consume `@social/core` and `@social/db`
+as built workspace packages, so run `pnpm build` at least once before
+`pnpm test` (see `.github/workflows/ci.yml`, which builds before testing).
+
+Each test file in `packages/db`, `apps/api`, and `packages/mcp-server` gets
+its own throwaway Postgres schema (see `packages/db/test/setup.ts` and the
+analogous `test/setup.ts` in the other two), so tests can run against any
+bare Postgres instance — including the one started by
 `docker compose up -d postgres` above — with no hand-provisioned database
 or seed data. CI provisions Postgres via a GitHub Actions service
 container (see `.github/workflows/ci.yml`).
