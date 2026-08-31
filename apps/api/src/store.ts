@@ -50,23 +50,43 @@ export const store = {
   },
   async addMockAccounts(): Promise<AccountSummary[]> {
     if (process.env.MOCK_MODE === "true") {
-      const count = await prisma.account.count();
-      if (count === 0) {
-        for (const platform of MOCK_PLATFORMS) {
-          await prisma.account.create({
-            data: {
+      for (const platform of MOCK_PLATFORMS) {
+        const encryptedAccessToken = encrypt(`mock-${platform}-token`);
+        const expiresAt = new Date(Date.now() + 86_400_000);
+        await prisma.account.upsert({
+          where: {
+            platform_externalId: {
               platform: toPrismaPlatform(platform),
-              displayName: `Demo ${platform}`,
               externalId: `demo-${platform}`,
-              token: {
+            },
+          },
+          update: {
+            displayName: `Demo ${platform}`,
+            token: {
+              upsert: {
                 create: {
-                  encryptedAccessToken: encrypt(`mock-${platform}-token`),
-                  expiresAt: new Date(Date.now() + 86_400_000),
+                  encryptedAccessToken,
+                  expiresAt,
+                },
+                update: {
+                  encryptedAccessToken,
+                  expiresAt,
                 },
               },
             },
-          });
-        }
+          },
+          create: {
+            platform: toPrismaPlatform(platform),
+            displayName: `Demo ${platform}`,
+            externalId: `demo-${platform}`,
+            token: {
+              create: {
+                encryptedAccessToken,
+                expiresAt,
+              },
+            },
+          },
+        });
       }
     }
     return this.accounts();
