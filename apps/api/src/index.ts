@@ -8,7 +8,9 @@ app.get("/accounts", async () => store.addMockAccounts());
 app.get("/drafts", async () => store.drafts());
 app.post<{ Body: { text: string; mediaUrls?: string[] } }>("/drafts", async (request, reply) => reply.code(201).send(store.createDraft(request.body)));
 app.post<{ Params: { id: string }; Body: { text?: string; mediaUrls?: string[] } }>("/drafts/:id", async (request, reply) => {
-  const draft = store.updateDraft(request.params.id, request.body); return draft ? draft : reply.code(404).send({ error: "Draft not found" });
+  if (!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(request.params.id)) return reply.code(400).send({ error: "Invalid draft id" });
+  const draft = store.updateDraft(request.params.id, request.body);
+  return draft ? reply.type("application/json").send(JSON.stringify(draft)) : reply.code(404).send({ error: "Draft not found" });
 });
 app.post<{ Body: { text: string; platforms: PlatformId[]; mediaUrls?: string[] } }>("/publish", async (request, reply) => {
   const accessToken = process.env.MOCK_MODE === "true" ? "mock" : process.env.SOCIAL_ACCESS_TOKEN;
