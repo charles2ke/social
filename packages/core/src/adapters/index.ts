@@ -1,0 +1,2 @@
+import { facebook } from "./facebook.js"; import { instagram } from "./instagram.js"; import { linkedin } from "./linkedin.js"; import { snapchat } from "./snapchat.js"; import { strava } from "./strava.js"; import { substack } from "./substack.js"; import { tiktok } from "./tiktok.js"; import { whatsapp } from "./whatsapp.js"; import { youtube } from "./youtube.js";
+export const adapters = { instagram, facebook, whatsapp, linkedin, substack, youtube, snapchat, tiktok, strava };

@@ -1,0 +1,9 @@
+{
+  "name": "@social/mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "social-mcp": "./dist/mcp-server/src/index.js" },
+  "scripts": { "build": "tsc -p tsconfig.json", "lint": "eslint src", "typecheck": "tsc -p tsconfig.json --noEmit", "test": "vitest run --passWithNoTests" },
+  "dependencies": { "@modelcontextprotocol/sdk": "1.12.0", "@social/core": "workspace:*", "zod": "3.25.76" }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "@social/api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/apps/api/src/index.js",
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint src",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": { "@social/core": "workspace:*", "fastify": "5.2.1" },
+  "devDependencies": { "@prisma/client": "6.2.1", "prisma": "6.2.1", "tsx": "4.19.2" }
+}
