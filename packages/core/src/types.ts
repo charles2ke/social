@@ -6,15 +6,16 @@ export type MediaKind = (typeof mediaKinds)[number];
 export type MediaAttachment = { url: string; kind: MediaKind; altText?: string };
 /** Per-platform publishing limits for image/video attachments. */
 export type MediaConstraints = { maxAttachments: number; allowsMixedKinds: boolean; requiresMedia?: boolean; requiresKind?: MediaKind };
-export type TokenSet = { accessToken: string; refreshToken?: string; expiresAt?: Date };
+/** `externalId` is the platform-side account id (page id, IG user id, LinkedIn URN…) resolved at connect time; publishing endpoints are scoped to it. */
+export type TokenSet = { accessToken: string; refreshToken?: string; expiresAt?: Date; externalId?: string };
 export type Profile = { id: string; name: string; avatarUrl?: string };
 export type PostDraft = { id?: string; text: string; mediaUrls?: string[]; media?: MediaAttachment[]; perPlatformOverrides?: Record<string, Partial<PostDraft>> };
 export type PublishResult = { platformPostId: string; url?: string; publishedAt: Date };
 export type PostRef = { platformPostId: string };
 export type Metrics = { impressions?: number; engagements?: number; likes?: number; comments?: number };
 export class UnsupportedOperation extends Error {
-  constructor(public readonly platform: PlatformId, operation: string) {
-    super(`${platform} does not support ${operation} through its public API`);
+  constructor(public readonly platform: PlatformId, operation: string, reason?: string) {
+    super(reason ?? `${platform} does not support ${operation} through its public API`);
     this.name = "UnsupportedOperation";
   }
 }

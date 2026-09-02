@@ -37,6 +37,64 @@ configured**. Production deployments must use HTTPS, a strong `ADMIN_TOKEN`,
 and platform credentials. Tokens are encrypted with AES-256-GCM before
 persistence; errors must not include token values.
 
+## Platform integrations
+
+Each platform is a `PlatformSpec` in
+[`packages/core/src/adapters`](packages/core/src/adapters) wrapped by
+`ApiAdapter`, which handles OAuth, mock mode, per-platform draft overrides,
+and token redaction. `fetch` and the environment are injected, so the API
+clients are unit-tested without network access.
+
+| Platform | Publishing | Media | Analytics | Notes |
+| --- | --- | --- | --- | --- |
+| Facebook | Page feed (`/{page-id}/feed`) | image *or* video, up to 10 | Post insights + like/comment counts | Long-lived tokens are exchanged, not refreshed. [Meta apps](https://developers.facebook.com/docs/) |
+| Instagram | Media container + `media_publish` | image/video, up to 10, required | Media insights + counts | Requires media — the API has no text-only post. Needs a Business/Creator account |
+| LinkedIn | `ugcPosts` share | up to 9 images *or* 1 video | Social actions (likes/comments) | Refreshable member tokens. [LinkedIn apps](https://www.linkedin.com/developers/) |
+| WhatsApp | Cloud API text message | — | — | Messages opted-in `WHATSAPP_RECIPIENTS`; the [Cloud API](https://developers.facebook.com/docs/whatsapp/cloud-api) has no broadcast post |
+| YouTube | Data API v3 resumable `videos.insert` | exactly 1 video (required) | Video statistics | Requires a video URL; visibility via `YOUTUBE_PRIVACY_STATUS` |
+| TikTok | `/v2/post/publish/video/init/` (`PULL_FROM_URL`) | exactly 1 video (required) | `/v2/video/query/` | Unaudited apps may only post `SELF_ONLY`; the video URL must be on a verified domain |
+| Strava | `POST /api/v3/activities` | — | — | Strava has no feed post type, so a post becomes an activity |
+| Snapchat, Substack | Not supported | — | — | No public API for publishing organic content; both raise `UnsupportedOperation` |
+
+The Facebook feed post and LinkedIn share currently publish text (Facebook
+attaches a single media URL as a link); asset uploads through `/photos` and
+LinkedIn's `registerUpload` flow are not implemented, so attaching media to a
+LinkedIn post is rejected rather than silently dropped.
+
+### Connecting an account
+
+1. Register each platform's OAuth app with the callback
+   `BASE_URL/api/oauth/<platform>/callback` and set its client id/secret in
+   `.env`.
+2. Visit `BASE_URL/api/oauth/<platform>/start`. The API redirects to the
+   platform with an HMAC-signed, ten-minute `state` value, so the callback is
+   verified statelessly and CSRF is blocked without server-side session state.
+3. The callback exchanges the code, reads the platform profile, and stores the
+   account with its **AES-256-GCM encrypted** access/refresh tokens (see
+   `accounts` and `oauth_tokens` in [`packages/db`](packages/db)). Tokens are
+   refreshed automatically five minutes before expiry when publishing.
+
+The stored account id is the id the platform's *publishing* endpoints are
+scoped to, which is not always the user who authorized the app: Facebook
+resolves the Page from `/me/accounts`, and Instagram the Business account
+linked to that Page. Set `FACEBOOK_PAGE_ID` / `INSTAGRAM_PAGE_ID` to choose
+when an account administers several Pages; otherwise the first is used, and
+connecting fails with an explanation when there is none.
+
+The callback is the only unauthenticated write path, so it is rate limited
+per client IP (`OAUTH_CALLBACK_RATE_LIMIT`, default 20/minute). Platform
+responses and errors are passed through `redactSecrets` so that tokens never
+reach logs or API responses.
+
+### API authentication
+
+Outside mock mode, `ADMIN_TOKEN` is required and every route except `/health`
+and the OAuth callback (which is authenticated by its signed `state`) needs
+an `Authorization` header carrying `ADMIN_TOKEN` as a bearer token. The API
+refuses to start without it.
+Because a browser cannot hold that token safely, serve the dashboard behind
+your own authenticated proxy when `ADMIN_TOKEN` is set.
+
 ## Database
 
 The persistence layer is **PostgreSQL, accessed through Prisma** — see
@@ -91,26 +149,6 @@ When PgBouncer runs in transaction pooling mode, append `pgbouncer=true`
 to `DATABASE_URL` so Prisma disables features that don't work with
 statement-level pooling (see the commented example in `.env.example`).
 
-## Platforms
-
-| Platform | Publish API / scope | Media | Analytics | Note |
-| --- | --- | --- | --- | --- |
-| Instagram | Meta Graph: `/me/accounts`, IG `media` + `media_publish` | image/video, up to 10, media required | yes | Register at [Meta](https://developers.facebook.com/docs/instagram-platform/content-publishing/). |
-| Facebook | Meta Graph: `/me/accounts` | image *or* video, up to 10 | yes | Register at [Meta](https://developers.facebook.com/docs/instagram-platform/content-publishing/). |
-| WhatsApp | Cloud `/{phone-number-id}/messages` | template/text | no | Register [Cloud API](https://developers.facebook.com/docs/whatsapp/cloud-api). |
-| LinkedIn | `/rest/posts`, `w_member_social` | up to 9 images *or* 1 video | yes | [LinkedIn apps](https://www.linkedin.com/developers/). |
-| YouTube | Data API v3 resumable `videos.insert` | exactly 1 video (required) | yes | [Google Cloud](https://console.cloud.google.com/). |
-| TikTok | `/v2/post/publish/video/init/` | exactly 1 video (required) | yes | [TikTok developers](https://developers.tiktok.com/). |
-| Snapchat | Marketing/Creative API | — | — | Stub: creative publishing access is approval-limited. |
-| Strava | `POST /api/v3/activities` | — | no | [Strava API](https://developers.strava.com/). |
-| Substack | No public write API | — | no | Stub: export content as an email-ready draft; no scraping/automation. |
-
-Set each client ID/secret in `.env` and configure callback URLs as
-`https://your-host/api/oauth/<platform>/callback`. The adapters use typed
-`UnsupportedOperation` errors for unavailable public writes and implement
-rate-limit retry/backoff at the API boundary. Per-platform keys are documented
-in `.env.example`.
-
 ## Images and videos
 
 Posts carry typed attachments: `media: [{ url, kind: "image" | "video", altText? }]`.
@@ -142,6 +180,8 @@ draft, publishing, scheduling, status, and analytics tools plus
 
 Use this in `claude_desktop_config.json` or VS Code MCP settings after
 `corepack pnpm build`. It includes the `cross_platform_announcement` prompt.
+The MCP server publishes with the single `SOCIAL_ACCESS_TOKEN` fallback; it
+does not yet read the connected accounts the API stores in Postgres.
 
 ## Development
 

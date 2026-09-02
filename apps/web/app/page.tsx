@@ -4,10 +4,11 @@ import { inferMediaKind, isHttpUrl, safeMediaSrc, type MediaAttachment } from ".
 const platforms = ["instagram", "facebook", "whatsapp", "linkedin", "substack", "youtube", "snapchat", "tiktok", "strava"];
 const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 type Compatibility = { platform: string; compatible: boolean; reason?: string };
+type PublishResult = { platform: string; status: "published" | "failed"; url?: string; error?: string };
 export default function Dashboard() {
   const [text, setText] = useState(""); const [selected, setSelected] = useState(["instagram"]);
   const [media, setMedia] = useState<MediaAttachment[]>([]); const [mediaUrl, setMediaUrl] = useState(""); const [altText, setAltText] = useState("");
-  const [warnings, setWarnings] = useState<Compatibility[]>([]); const [status, setStatus] = useState("");
+  const [warnings, setWarnings] = useState<Compatibility[]>([]); const [results, setResults] = useState<PublishResult[]>([]); const [status, setStatus] = useState("");
   useEffect(() => {
     const controller = new AbortController();
     fetch(`${apiUrl}/media/validate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: "", media }), signal: controller.signal })
@@ -28,12 +29,13 @@ export default function Dashboard() {
     setMediaUrl(""); setAltText(""); setStatus("");
   };
   const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    const response = await fetch(`${apiUrl}/publish`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text, platforms: selected, media }) });
-    const result: unknown = await response.json().catch(() => undefined);
-    if (!response.ok) { setStatus((result as { error?: string })?.error ?? "Publishing failed"); return; }
-    const failed = (Array.isArray(result) ? result : []).filter((item: { status?: string }) => item.status === "failed");
-    setStatus(failed.length ? failed.map((item: { platform: string; error: string }) => `${item.platform}: ${item.error}`).join(" · ") : "Post queued for publishing");
+    event.preventDefault(); setStatus("Publishing…"); setResults([]);
+    try {
+      const response = await fetch(`${apiUrl}/publish`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text, platforms: selected, media }) });
+      const body: unknown = await response.json().catch(() => undefined);
+      if (!response.ok) { setStatus((body as { error?: string })?.error ?? `Publishing failed (${response.status})`); return; }
+      setResults(Array.isArray(body) ? (body as PublishResult[]) : []); setStatus("");
+    } catch { setStatus("Could not reach the API"); }
   };
   return <main><header><h1>Social</h1><p>Self-hosted social media manager</p></header><section><h2>Compose</h2><form onSubmit={submit}><textarea aria-label="Post text" value={text} onChange={(e) => setText(e.target.value)} maxLength={3000} placeholder="Share an update…" required /><p>{text.length}/3000 characters</p>
     <fieldset><legend>Images &amp; videos</legend>
@@ -48,5 +50,5 @@ export default function Dashboard() {
       {warnings.length > 0 && <ul className="media-warnings">{warnings.map((item) => <li key={item.platform}>{item.reason}</li>)}</ul>}
     </fieldset>
     <fieldset><legend>Publish to</legend>{platforms.map((platform) => <label key={platform}><input type="checkbox" checked={selected.includes(platform)} onChange={() => setSelected((items) => items.includes(platform) ? items.filter((item) => item !== platform) : [...items, platform])} /> {platform}</label>)}</fieldset>
-    <button type="submit">Publish now</button>{status && <p role="status">{status}</p>}</form></section><section><h2>Upcoming</h2><p>Schedule posts through the API or MCP server. Mock mode includes demo accounts.</p></section></main>;
+    <button type="submit">Publish now</button></form><div role="status">{status}{results.length > 0 && <ul>{results.map((result) => <li key={result.platform}>{result.platform}: {result.status === "published" ? <>published{result.url ? <> — <a href={result.url}>view</a></> : null}</> : `failed — ${result.error}`}</li>)}</ul>}</div></section><section><h2>Upcoming</h2><p>Schedule posts through the API or MCP server. Mock mode includes demo accounts.</p></section></main>;
 }
