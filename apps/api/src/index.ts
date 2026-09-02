@@ -1,4 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
+import rateLimit from "@fastify/rate-limit";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import {
   ConfigurationError,
@@ -12,7 +13,6 @@ import {
 } from "@social/core";
 import { authorizedToken, createAccountRepository } from "./accounts.js";
 import { createState, verifyState } from "./oauth-state.js";
-import { createRateLimiter } from "./rate-limit.js";
 import { store } from "./store.js";
 
 const mockMode = process.env.MOCK_MODE === "true";
@@ -28,12 +28,14 @@ const isPlatform = (value: string): value is PlatformId => (platformIds as reado
 /** OAuth callbacks are authenticated by their signed `state`, not by the admin token. */
 const isCallback = (url: string) => /^\/api\/oauth\/[^/]+\/callback(\?|$)/.test(url);
 const isPublicRoute = (url: string) => url === "/health" || isCallback(url);
-const allowCallback = createRateLimiter(Number(process.env.OAUTH_CALLBACK_RATE_LIMIT ?? 20), 60_000);
+/**
+ * The OAuth callback is the only unauthenticated write path, so it is limited
+ * more tightly than the admin-authenticated routes.
+ */
+const callbackRateLimit = { max: Number(process.env.OAUTH_CALLBACK_RATE_LIMIT ?? 20), timeWindow: "1 minute" };
+await app.register(rateLimit, { max: Number(process.env.API_RATE_LIMIT ?? 300), timeWindow: "1 minute" });
 
 app.addHook("onRequest", async (request: FastifyRequest, reply: FastifyReply) => {
-  if (isCallback(request.url) && !allowCallback(request.ip)) {
-    return reply.code(429).send({ error: "Too many OAuth callback requests" });
-  }
   if (isPublicRoute(request.url) || !adminToken) return;
   const header = request.headers.authorization ?? "";
   const scheme = "Bearer ";
@@ -71,6 +73,7 @@ app.get<{ Params: { platform: string } }>("/api/oauth/:platform/start", async (r
 
 app.get<{ Params: { platform: string }; Querystring: { code?: string; state?: string; error?: string } }>(
   "/api/oauth/:platform/callback",
+  { config: { rateLimit: callbackRateLimit } },
   async (request, reply) => {
     const { platform } = request.params;
     const { code, state, error } = request.query;
