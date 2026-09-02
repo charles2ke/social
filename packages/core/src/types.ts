@@ -1,7 +1,8 @@
 export const platformIds = ["instagram", "facebook", "whatsapp", "linkedin", "substack", "youtube", "snapchat", "tiktok", "strava"] as const;
 export type PlatformId = (typeof platformIds)[number];
 export type Capabilities = { text: boolean; image: boolean; video: boolean; schedule: boolean; analytics: boolean };
-export type TokenSet = { accessToken: string; refreshToken?: string; expiresAt?: Date };
+/** `externalId` is the platform-side account id (page id, IG user id, LinkedIn URN…) resolved at connect time; publishing endpoints are scoped to it. */
+export type TokenSet = { accessToken: string; refreshToken?: string; expiresAt?: Date; externalId?: string };
 export type Profile = { id: string; name: string; avatarUrl?: string };
 export type PostDraft = { id?: string; text: string; mediaUrls?: string[]; perPlatformOverrides?: Record<string, Partial<PostDraft>> };
 export type PublishResult = { platformPostId: string; url?: string; publishedAt: Date };

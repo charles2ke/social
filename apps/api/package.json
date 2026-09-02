@@ -6,10 +6,17 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/apps/api/src/index.js",
     "build": "tsc -p tsconfig.json",
-    "lint": "eslint src",
+    "lint": "eslint src test",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run"
   },
-  "dependencies": { "@social/core": "workspace:*", "fastify": "5.2.1" },
-  "devDependencies": { "tsx": "4.19.2" }
+  "dependencies": {
+    "@social/core": "workspace:*",
+    "@social/db": "workspace:*",
+    "fastify": "5.2.1"
+  },
+  "devDependencies": {
+    "tsx": "4.19.2",
+    "vitest": "2.1.9"
+  }
 }

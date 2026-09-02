@@ -8,7 +8,14 @@
     "skipLibCheck": true,
     "declaration": true,
     "baseUrl": ".",
-    "paths": { "@social/core": ["packages/core/src/index.ts"] },
+    "paths": {
+      "@social/core": [
+        "packages/core/src/index.ts"
+      ],
+      "@social/db": [
+        "packages/db/src/index.ts"
+      ]
+    },
     "outDir": "dist"
   }
 }
