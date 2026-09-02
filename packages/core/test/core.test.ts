@@ -20,7 +20,9 @@ describe("media", () => {
     expect(media).toEqual([{ url: "https://cdn.example/a.png", kind: "image", altText: "A" }, { url: "https://cdn.example/b.mp4", kind: "video" }]);
   });
   it("rejects media whose kind cannot be determined", () => expect(() => normalizeMedia({ mediaUrls: ["https://cdn.example/file"] })).toThrow(MediaValidationError));
-  it("rejects non-http media URLs", () => expect(() => adapters.instagram.publish({ accessToken: "mock" }, { text: "Hi", mediaUrls: ["file:///etc/passwd.png"] })).rejects.toThrow(/http/));
+  it("rejects non-http media URLs", async () => {
+    await expect(adapters.instagram.publish({ accessToken: "mock" }, { text: "Hi", mediaUrls: ["file:///etc/passwd.png"] })).rejects.toThrow(/http/);
+  });
   it("publishes an image and a video to Instagram", async () => {
     process.env.MOCK_MODE = "true";
     const result = await adapters.instagram.publish({ accessToken: "mock" }, { text: "Hi", media: [{ url: "https://cdn.example/a.png", kind: "image" }, { url: "https://cdn.example/b.mp4", kind: "video" }] });

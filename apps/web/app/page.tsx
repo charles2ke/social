@@ -9,14 +9,14 @@ export default function Dashboard() {
   const [media, setMedia] = useState<MediaAttachment[]>([]); const [mediaUrl, setMediaUrl] = useState(""); const [altText, setAltText] = useState("");
   const [warnings, setWarnings] = useState<Compatibility[]>([]); const [status, setStatus] = useState("");
   useEffect(() => {
-    if (!media.length) { setWarnings([]); return; }
     const controller = new AbortController();
     fetch(`${apiUrl}/media/validate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: "", media }), signal: controller.signal })
       .then((response) => (response.ok ? response.json() : []))
-      .then((result: Compatibility[]) => setWarnings(Array.isArray(result) ? result.filter((item) => !item.compatible) : []))
+      // Warn only about the platforms the user actually publishes to; an empty list can still be incompatible (e.g. media-required platforms).
+      .then((result: Compatibility[]) => setWarnings(Array.isArray(result) ? result.filter((item) => !item.compatible && selected.includes(item.platform)) : []))
       .catch(() => setWarnings([]));
     return () => controller.abort();
-  }, [media]);
+  }, [media, selected]);
   const addMedia = () => {
     const url = mediaUrl.trim();
     if (!url) return;

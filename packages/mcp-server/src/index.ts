@@ -2,11 +2,11 @@
 import { randomUUID } from "node:crypto";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { adapters, type PlatformId, type PostDraft } from "@social/core";
+import { adapters, platformIds, type PlatformId, type PostDraft } from "@social/core";
 import { z } from "zod";
 
 const mediaSchema = z.array(z.object({ url: z.string().url(), kind: z.enum(["image", "video"]), altText: z.string().optional() })).optional().describe("Image/video attachments to publish with the post.");
-const platformSchema = z.enum(["instagram", "facebook", "whatsapp", "linkedin", "substack", "youtube", "snapchat", "tiktok", "strava"]);
+const platformSchema = z.enum(platformIds);
 const drafts = new Map<string, PostDraft>(); const scheduled = new Map<string, { draft: PostDraft; at: string; platforms: PlatformId[] }>();
 const text = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
 const server = new McpServer({ name: "social-manager", version: "0.1.0" });
