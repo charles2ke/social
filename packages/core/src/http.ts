@@ -22,12 +22,17 @@ export function redactSecrets(value: string): string {
 }
 
 export class PlatformApiError extends Error {
+  /** Redacted at construction: platform error payloads can echo tokens back, and this object gets logged and serialized. */
+  readonly detail: string;
+
   constructor(
     readonly platform: PlatformId,
     readonly status: number,
-    readonly detail: string,
+    detail: string,
   ) {
-    super(`${platform} API request failed with status ${status}: ${redactSecrets(detail).slice(0, 500)}`);
+    const safeDetail = redactSecrets(detail).slice(0, 500);
+    super(`${platform} API request failed with status ${status}: ${safeDetail}`);
+    this.detail = safeDetail;
     this.name = "PlatformApiError";
   }
 }

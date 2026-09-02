@@ -146,6 +146,71 @@ describe("publishing", () => {
     await expect(adapters.snapchat.publish(token, { text: "Hi" })).rejects.toBeInstanceOf(UnsupportedOperation);
     await expect(adapters.substack.publish(token, { text: "Hi" })).rejects.toBeInstanceOf(UnsupportedOperation);
   });
+
+  it("explains why a platform cannot publish instead of a generic message", async () => {
+    const { doFetch } = stubFetch([]);
+    const adapters = createAdapters({ env, fetch: doFetch });
+    await expect(adapters.substack.publish(token, { text: "Hi" })).rejects.toThrow("Substack has no public publishing API");
+    await expect(adapters.snapchat.publish(token, { text: "Hi" })).rejects.toThrow("Snapchat has no public organic publishing API");
+  });
+
+  it("sends WhatsApp messages with bounded concurrency", async () => {
+    const recipients = Array.from({ length: 7 }, (_, index) => `+1555000${index}`);
+    let inFlight = 0;
+    let peak = 0;
+    const calls: string[] = [];
+    const doFetch = async (url: string, init?: RequestInit) => {
+      calls.push(String(JSON.parse(String(init?.body)).to));
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      inFlight -= 1;
+      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify({ messages: [{ id: `msg-${url.length}` }] }) } as Response;
+    };
+    const adapters = createAdapters({ env: { ...env, WHATSAPP_RECIPIENTS: recipients.join(","), WHATSAPP_SEND_CONCURRENCY: "2" }, fetch: doFetch });
+    await expect(adapters.whatsapp.publish(token, { text: "Hi" })).resolves.toMatchObject({ platformPostId: expect.any(String) });
+    expect(calls).toHaveLength(recipients.length);
+    expect(peak).toBeLessThanOrEqual(2);
+  });
+
+  it("still publishes to WhatsApp when a single recipient fails, and fails when all do", async () => {
+    const failFirst = stubFetch([{ status: 400, body: { error: { message: "Invalid number" } } }, { body: { messages: [{ id: "msg-2" }] } }]);
+    const twoRecipients = { ...env, WHATSAPP_RECIPIENTS: "+15550001111,+15550002222", WHATSAPP_SEND_CONCURRENCY: "1" };
+    await expect(createAdapters({ env: twoRecipients, fetch: failFirst.doFetch }).whatsapp.publish(token, { text: "Hi" })).resolves.toMatchObject({ platformPostId: "msg-2" });
+
+    const allFail = stubFetch([{ status: 400, body: { error: { message: "Invalid number" } } }, { status: 400, body: { error: { message: "Invalid number" } } }]);
+    await expect(createAdapters({ env: twoRecipients, fetch: allFail.doFetch }).whatsapp.publish(token, { text: "Hi" })).rejects.toBeInstanceOf(PlatformApiError);
+  });
+});
+
+describe("connecting an account", () => {
+  it("resolves the Facebook Page that publishing targets, not the /me user", async () => {
+    const { calls, doFetch } = stubFetch([{ body: { data: [{ id: "page-1", name: "Test Page" }] } }]);
+    await expect(createAdapters({ env, fetch: doFetch }).facebook.getProfile(token)).resolves.toEqual({ id: "page-1", name: "Test Page" });
+    expect(calls[0].url).toBe("https://graph.facebook.com/v21.0/me/accounts?fields=id,name");
+  });
+
+  it("selects the configured Facebook Page and reports when it is absent", async () => {
+    const picked = stubFetch([{ body: { data: [{ id: "page-1" }, { id: "page-2", name: "Second" }] } }]);
+    const withPage = { ...env, FACEBOOK_PAGE_ID: "page-2" };
+    await expect(createAdapters({ env: withPage, fetch: picked.doFetch }).facebook.getProfile(token)).resolves.toEqual({ id: "page-2", name: "Second" });
+
+    const missing = stubFetch([{ body: { data: [{ id: "page-1" }] } }]);
+    await expect(createAdapters({ env: withPage, fetch: missing.doFetch }).facebook.getProfile(token)).rejects.toThrow(/page-2/);
+  });
+
+  it("resolves the linked Instagram Business account id", async () => {
+    const { calls, doFetch } = stubFetch([
+      { body: { data: [{ id: "page-1" }, { id: "page-2", instagram_business_account: { id: "ig-9", username: "brand" } }] } },
+    ]);
+    await expect(createAdapters({ env, fetch: doFetch }).instagram.getProfile(token)).resolves.toEqual({ id: "ig-9", name: "brand" });
+    expect(calls[0].url).toContain("instagram_business_account");
+  });
+
+  it("reports when no Instagram Business account is linked", async () => {
+    const { doFetch } = stubFetch([{ body: { data: [{ id: "page-1" }] } }]);
+    await expect(createAdapters({ env, fetch: doFetch }).instagram.getProfile(token)).rejects.toThrow(/Instagram Business account/);
+  });
 });
 
 describe("analytics", () => {
@@ -178,6 +243,14 @@ describe("secret handling", () => {
   it("keeps platform tokens out of API error messages", async () => {
     const { doFetch } = stubFetch([{ status: 401, body: { access_token: "token-value" } }]);
     await expect(createAdapters({ env, fetch: doFetch }).facebook.publish(token, { text: "Hi" })).rejects.toThrow(/\[redacted\]/);
+  });
+
+  it("keeps the stored PlatformApiError detail redacted too", async () => {
+    const { doFetch } = stubFetch([{ status: 401, body: { access_token: "token-value" } }]);
+    const error = await createAdapters({ env, fetch: doFetch }).facebook.publish(token, { text: "Hi" }).catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(PlatformApiError);
+    expect((error as PlatformApiError).detail).not.toContain("token-value");
+    expect((error as PlatformApiError).detail).toContain("[redacted]");
   });
 });
 

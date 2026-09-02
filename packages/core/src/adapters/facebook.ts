@@ -8,8 +8,19 @@ export const facebookSpec: PlatformSpec = {
   mediaConstraints: { maxAttachments: 10, allowsMixedKinds: false },
   oauth: metaOAuth(["pages_show_list", "pages_manage_posts", "pages_read_engagement", "read_insights"]),
   async getProfile(ctx) {
-    const me = await ctx.request<{ id: string; name: string }>(`${GRAPH_API}/me?fields=id,name`);
-    return { id: me.id, name: me.name };
+    // Publishing targets a Page feed, so the connected identity must be the Page the
+    // user administers — not the /me user id that authorized the app.
+    const pages = await ctx.request<{ data?: { id: string; name?: string }[] }>(`${GRAPH_API}/me/accounts?fields=id,name`);
+    const preferred = ctx.env.FACEBOOK_PAGE_ID;
+    const page = preferred ? pages.data?.find((candidate) => candidate.id === preferred) : pages.data?.[0];
+    if (!page) {
+      throw new Error(
+        preferred
+          ? `The authorized account does not manage a Facebook Page with id ${preferred}`
+          : "The authorized account manages no Facebook Page — publishing requires one",
+      );
+    }
+    return { id: page.id, name: page.name ?? page.id };
   },
   async publish(ctx, post) {
     const pageId = requireExternalId(ctx);

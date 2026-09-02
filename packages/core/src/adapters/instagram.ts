@@ -12,8 +12,23 @@ export const instagramSpec: PlatformSpec = {
   mediaConstraints: { maxAttachments: 10, allowsMixedKinds: true, requiresMedia: true },
   oauth: metaOAuth(["instagram_basic", "instagram_content_publish", "instagram_manage_insights", "pages_show_list"]),
   async getProfile(ctx) {
-    const me = await ctx.request<{ id: string; username?: string }>(`${GRAPH_API}/me?fields=id,username`);
-    return { id: me.id, name: me.username ?? me.id };
+    // The publishing endpoints are scoped to the Instagram user id linked to a Page,
+    // which is not the Graph /me id of the user who authorized the app.
+    const pages = await ctx.request<{ data?: { id: string; instagram_business_account?: { id: string; username?: string } }[] }>(
+      `${GRAPH_API}/me/accounts?fields=instagram_business_account{id,username}`,
+    );
+    const preferred = ctx.env.INSTAGRAM_PAGE_ID;
+    const linked = (pages.data ?? []).filter((page) => page.instagram_business_account);
+    const page = preferred ? linked.find((candidate) => candidate.id === preferred) : linked[0];
+    const account = page?.instagram_business_account;
+    if (!account) {
+      throw new Error(
+        preferred
+          ? `Facebook Page ${preferred} has no linked Instagram Business account`
+          : "No Instagram Business account is linked to the authorized Facebook Page(s) — publishing requires one",
+      );
+    }
+    return { id: account.id, name: account.username ?? account.id };
   },
   async publish(ctx, post) {
     const userId = encodeURIComponent(requireExternalId(ctx));

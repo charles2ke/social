@@ -74,6 +74,13 @@ LinkedIn post is rejected rather than silently dropped.
    `accounts` and `oauth_tokens` in [`packages/db`](packages/db)). Tokens are
    refreshed automatically five minutes before expiry when publishing.
 
+The stored account id is the id the platform's *publishing* endpoints are
+scoped to, which is not always the user who authorized the app: Facebook
+resolves the Page from `/me/accounts`, and Instagram the Business account
+linked to that Page. Set `FACEBOOK_PAGE_ID` / `INSTAGRAM_PAGE_ID` to choose
+when an account administers several Pages; otherwise the first is used, and
+connecting fails with an explanation when there is none.
+
 The callback is the only unauthenticated write path, so it is rate limited
 per client IP (`OAUTH_CALLBACK_RATE_LIMIT`, default 20/minute). Platform
 responses and errors are passed through `redactSecrets` so that tokens never

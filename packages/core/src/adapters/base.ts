@@ -130,7 +130,7 @@ export class ApiAdapter implements PlatformAdapter {
   }
 
   async publish(token: TokenSet, post: PostDraft): Promise<PublishResult> {
-    if (this.spec.publishUnsupported) throw new UnsupportedOperation(this.id, "publishing");
+    if (this.spec.publishUnsupported) throw new UnsupportedOperation(this.id, "publishing", this.spec.publishUnsupported);
     const draft = { ...post, ...(post.perPlatformOverrides?.[this.id] ?? {}) };
     const media = normalizeMedia(draft);
     if (!draft.text.trim() && !media.length) throw new Error("Post text is required");

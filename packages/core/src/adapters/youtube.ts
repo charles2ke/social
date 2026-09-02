@@ -4,7 +4,12 @@ import type { PlatformSpec } from "./base.js";
 const API = "https://www.googleapis.com/youtube/v3";
 const UPLOAD = "https://www.googleapis.com/upload/youtube/v3/videos";
 
-/** YouTube uploads are binary, so they bypass the JSON helper and stream directly. */
+/**
+ * YouTube uploads are binary, so they bypass the JSON helper and call `fetch` directly.
+ * The video is buffered fully into memory before being sent, so a large source
+ * video can exhaust the process's heap — keep uploads modest until this is
+ * switched to a streaming body.
+ */
 export const youtubeSpec: PlatformSpec = {
   id: "youtube",
   capabilities: { text: true, image: false, video: true, schedule: true, analytics: true },

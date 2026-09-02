@@ -14,8 +14,8 @@ export type PublishResult = { platformPostId: string; url?: string; publishedAt:
 export type PostRef = { platformPostId: string };
 export type Metrics = { impressions?: number; engagements?: number; likes?: number; comments?: number };
 export class UnsupportedOperation extends Error {
-  constructor(public readonly platform: PlatformId, operation: string) {
-    super(`${platform} does not support ${operation} through its public API`);
+  constructor(public readonly platform: PlatformId, operation: string, reason?: string) {
+    super(reason ?? `${platform} does not support ${operation} through its public API`);
     this.name = "UnsupportedOperation";
   }
 }
