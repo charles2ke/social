@@ -12,6 +12,7 @@ import {
 } from "@social/core";
 import { authorizedToken, createAccountRepository } from "./accounts.js";
 import { createState, verifyState } from "./oauth-state.js";
+import { createRateLimiter } from "./rate-limit.js";
 import { store } from "./store.js";
 
 const mockMode = process.env.MOCK_MODE === "true";
@@ -25,9 +26,14 @@ const app = Fastify({ logger: false });
 const isPlatform = (value: string): value is PlatformId => (platformIds as readonly string[]).includes(value);
 
 /** OAuth callbacks are authenticated by their signed `state`, not by the admin token. */
-const isPublicRoute = (url: string) => url === "/health" || /^\/api\/oauth\/[^/]+\/callback(\?|$)/.test(url);
+const isCallback = (url: string) => /^\/api\/oauth\/[^/]+\/callback(\?|$)/.test(url);
+const isPublicRoute = (url: string) => url === "/health" || isCallback(url);
+const allowCallback = createRateLimiter(Number(process.env.OAUTH_CALLBACK_RATE_LIMIT ?? 20), 60_000);
 
 app.addHook("onRequest", async (request: FastifyRequest, reply: FastifyReply) => {
+  if (isCallback(request.url) && !allowCallback(request.ip)) {
+    return reply.code(429).send({ error: "Too many OAuth callback requests" });
+  }
   if (isPublicRoute(request.url) || !adminToken) return;
   const header = request.headers.authorization ?? "";
   const scheme = "Bearer ";

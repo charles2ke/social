@@ -69,8 +69,10 @@ clients are unit-tested without network access.
    `accounts` and `oauth_tokens` in [`packages/db`](packages/db)). Tokens are
    refreshed automatically five minutes before expiry when publishing.
 
-Platform responses and errors are passed through `redactSecrets` so that
-tokens never reach logs or API responses.
+The callback is the only unauthenticated write path, so it is rate limited
+per client IP (`OAUTH_CALLBACK_RATE_LIMIT`, default 20/minute). Platform
+responses and errors are passed through `redactSecrets` so that tokens never
+reach logs or API responses.
 
 ### API authentication
 
