@@ -16,14 +16,14 @@ app.get("/drafts", async () => store.drafts());
 app.post<{ Body: DraftBody }>("/drafts", async (request, reply) => {
   const media = resolveMedia(request.body);
   if (media instanceof Error) return reply.code(400).send({ error: media.message });
-  return reply.code(201).send(store.createDraft({ ...request.body, media }));
+  return reply.code(201).type("application/json").send(store.createDraft({ ...request.body, media }));
 });
 app.post<{ Params: { id: string }; Body: Partial<DraftBody> }>("/drafts/:id", async (request, reply) => {
   if (!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(request.params.id)) return reply.code(400).send({ error: "Invalid draft id" });
   const media = resolveMedia(request.body);
   if (media instanceof Error) return reply.code(400).send({ error: media.message });
   const draft = store.updateDraft(request.params.id, { ...request.body, media });
-  return draft ? reply.send(draft) : reply.code(404).send({ error: "Draft not found" });
+  return draft ? reply.type("application/json").send(draft) : reply.code(404).send({ error: "Draft not found" });
 });
 app.post<{ Body: DraftBody & { platforms: PlatformId[] } }>("/publish", async (request, reply) => {
   const accessToken = process.env.MOCK_MODE === "true" ? "mock" : process.env.SOCIAL_ACCESS_TOKEN;
