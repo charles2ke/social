@@ -7,6 +7,8 @@ type DraftBody = { text: string; mediaUrls?: string[]; media?: MediaAttachment[]
 function resolveMedia(body: Partial<DraftBody>): MediaAttachment[] | Error {
   try { return normalizeMedia(body); } catch (error) { return error instanceof MediaValidationError ? error : new Error("Invalid media"); }
 }
+// Every route replies with JSON only; nosniff keeps a browser from rendering echoed draft text as HTML.
+app.addHook("onSend", async (_request, reply) => { reply.header("X-Content-Type-Options", "nosniff"); reply.type("application/json"); });
 app.get("/health", async () => ({ ok: true }));
 app.get("/platforms", async () => Object.values(adapters).map(({ id, capabilities, mediaConstraints }) => ({ id, capabilities, mediaConstraints })));
 app.get("/accounts", async () => store.addMockAccounts());

@@ -1,6 +1,6 @@
 "use client";
 import { FormEvent, useEffect, useState } from "react";
-import { inferMediaKind, isHttpUrl, type MediaAttachment } from "./media";
+import { inferMediaKind, isHttpUrl, safeMediaSrc, type MediaAttachment } from "./media";
 const platforms = ["instagram", "facebook", "whatsapp", "linkedin", "substack", "youtube", "snapchat", "tiktok", "strava"];
 const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 type Compatibility = { platform: string; compatible: boolean; reason?: string };
@@ -41,7 +41,7 @@ export default function Dashboard() {
       <label htmlFor="media-alt">Alt text</label> <input id="media-alt" type="text" value={altText} onChange={(e) => setAltText(e.target.value)} placeholder="Describe the image or video" />
       <button type="button" onClick={addMedia}>Add media</button>
       {media.length > 0 && <ul className="media-list">{media.map((item) => <li key={item.url}>
-        {item.kind === "image" ? <img src={item.url} alt={item.altText ?? ""} /> : <video src={item.url} controls aria-label={item.altText ?? item.url} />}
+        {item.kind === "image" ? <img src={safeMediaSrc(item.url)} alt={item.altText ?? ""} /> : <video src={safeMediaSrc(item.url)} controls aria-label={item.altText ?? item.url} />}
         <span>{item.kind}</span> <span className="media-url">{item.url}</span>
         <button type="button" onClick={() => setMedia((items) => items.filter((existing) => existing.url !== item.url))}>Remove</button>
       </li>)}</ul>}
