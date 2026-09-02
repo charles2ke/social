@@ -45,16 +45,21 @@ Each platform is a `PlatformSpec` in
 and token redaction. `fetch` and the environment are injected, so the API
 clients are unit-tested without network access.
 
-| Platform | Publishing | Analytics | Notes |
-| --- | --- | --- | --- |
-| Facebook | Page feed (`/{page-id}/feed`) | Post insights + like/comment counts | Long-lived tokens are exchanged, not refreshed. [Meta apps](https://developers.facebook.com/docs/) |
-| Instagram | Media container + `media_publish` | Media insights + counts | Requires media — the API has no text-only post. Needs a Business/Creator account |
-| LinkedIn | `ugcPosts` share | Social actions (likes/comments) | Refreshable member tokens. [LinkedIn apps](https://www.linkedin.com/developers/) |
-| WhatsApp | Cloud API text message | — | Messages opted-in `WHATSAPP_RECIPIENTS`; the [Cloud API](https://developers.facebook.com/docs/whatsapp/cloud-api) has no broadcast post |
-| YouTube | Data API v3 resumable `videos.insert` | Video statistics | Requires a video URL; visibility via `YOUTUBE_PRIVACY_STATUS` |
-| TikTok | `/v2/post/publish/video/init/` (`PULL_FROM_URL`) | `/v2/video/query/` | Unaudited apps may only post `SELF_ONLY`; the video URL must be on a verified domain |
-| Strava | `POST /api/v3/activities` | — | Strava has no feed post type, so a post becomes an activity |
-| Snapchat, Substack | Not supported | — | No public API for publishing organic content; both raise `UnsupportedOperation` |
+| Platform | Publishing | Media | Analytics | Notes |
+| --- | --- | --- | --- | --- |
+| Facebook | Page feed (`/{page-id}/feed`) | image *or* video, up to 10 | Post insights + like/comment counts | Long-lived tokens are exchanged, not refreshed. [Meta apps](https://developers.facebook.com/docs/) |
+| Instagram | Media container + `media_publish` | image/video, up to 10, required | Media insights + counts | Requires media — the API has no text-only post. Needs a Business/Creator account |
+| LinkedIn | `ugcPosts` share | up to 9 images *or* 1 video | Social actions (likes/comments) | Refreshable member tokens. [LinkedIn apps](https://www.linkedin.com/developers/) |
+| WhatsApp | Cloud API text message | — | — | Messages opted-in `WHATSAPP_RECIPIENTS`; the [Cloud API](https://developers.facebook.com/docs/whatsapp/cloud-api) has no broadcast post |
+| YouTube | Data API v3 resumable `videos.insert` | exactly 1 video (required) | Video statistics | Requires a video URL; visibility via `YOUTUBE_PRIVACY_STATUS` |
+| TikTok | `/v2/post/publish/video/init/` (`PULL_FROM_URL`) | exactly 1 video (required) | `/v2/video/query/` | Unaudited apps may only post `SELF_ONLY`; the video URL must be on a verified domain |
+| Strava | `POST /api/v3/activities` | — | — | Strava has no feed post type, so a post becomes an activity |
+| Snapchat, Substack | Not supported | — | — | No public API for publishing organic content; both raise `UnsupportedOperation` |
+
+The Facebook feed post and LinkedIn share currently publish text (Facebook
+attaches a single media URL as a link); asset uploads through `/photos` and
+LinkedIn's `registerUpload` flow are not implemented, so attaching media to a
+LinkedIn post is rejected rather than silently dropped.
 
 ### Connecting an account
 
@@ -136,6 +141,25 @@ Postgres and point both consumers at it instead of the database directly.
 When PgBouncer runs in transaction pooling mode, append `pgbouncer=true`
 to `DATABASE_URL` so Prisma disables features that don't work with
 statement-level pooling (see the commented example in `.env.example`).
+
+## Images and videos
+
+Posts carry typed attachments: `media: [{ url, kind: "image" | "video", altText? }]`.
+`kind` is inferred from the URL extension when you use the legacy
+`mediaUrls: string[]` field, so existing callers keep working — a URL with an
+unrecognised extension must declare its `kind` explicitly. Only `http(s)`
+URLs are accepted; media is referenced by URL and fetched by the platform,
+so the app never proxies uploads.
+
+Every adapter declares `mediaConstraints` (`maxAttachments`,
+`allowsMixedKinds`, `requiresMedia`, `requiresKind`) next to its
+capabilities, and `publish()` rejects incompatible media before contacting a
+platform — for example an image sent to TikTok, ten attachments on LinkedIn,
+or a YouTube post with no video. `GET /platforms` and the MCP
+`list_platforms` tool return those constraints, `POST /media/validate`
+reports per-platform compatibility for a draft (the dashboard uses it to warn
+while you compose), and `POST /publish` returns a per-platform
+`status: "published" | "failed"` instead of failing the whole request.
 
 ## MCP
 

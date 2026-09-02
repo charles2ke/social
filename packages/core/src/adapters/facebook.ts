@@ -5,6 +5,7 @@ import { GRAPH_API, insightValue, metaOAuth, type GraphInsights } from "./meta.j
 export const facebookSpec: PlatformSpec = {
   id: "facebook",
   capabilities: { text: true, image: true, video: true, schedule: true, analytics: true },
+  mediaConstraints: { maxAttachments: 10, allowsMixedKinds: false },
   oauth: metaOAuth(["pages_show_list", "pages_manage_posts", "pages_read_engagement", "read_insights"]),
   async getProfile(ctx) {
     const me = await ctx.request<{ id: string; name: string }>(`${GRAPH_API}/me?fields=id,name`);
@@ -12,7 +13,9 @@ export const facebookSpec: PlatformSpec = {
   },
   async publish(ctx, post) {
     const pageId = requireExternalId(ctx);
-    const link = post.mediaUrls?.[0];
+    // The feed endpoint takes a single link; multi-asset posts need /photos uploads, which are not implemented.
+    if (post.media.length > 1) throw new Error("Facebook publishing currently supports a single image or video URL");
+    const link = post.media[0]?.url;
     const created = await ctx.request<{ id: string }>(`${GRAPH_API}/${encodeURIComponent(pageId)}/feed`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

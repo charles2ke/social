@@ -8,6 +8,8 @@ const UPLOAD = "https://www.googleapis.com/upload/youtube/v3/videos";
 export const youtubeSpec: PlatformSpec = {
   id: "youtube",
   capabilities: { text: true, image: false, video: true, schedule: true, analytics: true },
+  // videos.insert uploads exactly one video; thumbnails are set separately.
+  mediaConstraints: { maxAttachments: 1, allowsMixedKinds: false, requiresKind: "video" },
   oauth: {
     authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth",
     tokenUrl: "https://oauth2.googleapis.com/token",
@@ -27,7 +29,7 @@ export const youtubeSpec: PlatformSpec = {
     return { id: channel.id, name: channel.snippet?.title ?? channel.id };
   },
   async publish(ctx, post) {
-    const source = post.mediaUrls?.[0];
+    const source = post.media[0]?.url;
     if (!source) throw new Error("YouTube requires a video URL to upload");
     const authorization = ["Bearer", ctx.token.accessToken].join(" ");
     const [title, ...rest] = post.text.split("\n");

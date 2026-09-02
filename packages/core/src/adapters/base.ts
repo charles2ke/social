@@ -1,8 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { ConfigurationError, defaultFetch, type FetchLike, requestJson } from "../http.js";
 import { buildAuthorizeUrl, exchangeAuthorizationCode, type Env, type OAuthSpec, refreshAccessToken } from "../oauth.js";
+import { normalizeMedia, validateMedia } from "../media.js";
 import {
   type Capabilities,
+  type MediaAttachment,
+  type MediaConstraints,
   type Metrics,
   type PlatformAdapter,
   type PlatformId,
@@ -23,12 +26,19 @@ export type AdapterContext = {
   fetch: FetchLike;
 };
 
+/** A draft whose legacy `mediaUrls` have been merged into typed, validated attachments. */
+export type NormalizedDraft = PostDraft & { media: MediaAttachment[] };
+
+const noMedia: MediaConstraints = { maxAttachments: 0, allowsMixedKinds: false };
+
 export type PlatformSpec = {
   id: PlatformId;
   capabilities: Capabilities;
+  /** Image/video limits the platform's publishing endpoint enforces. */
+  mediaConstraints?: MediaConstraints;
   oauth?: OAuthSpec;
   getProfile?(ctx: AdapterContext): Promise<Profile>;
-  publish?(ctx: AdapterContext, post: PostDraft): Promise<PublishResult>;
+  publish?(ctx: AdapterContext, post: NormalizedDraft): Promise<PublishResult>;
   getAnalytics?(ctx: AdapterContext, ref: PostRef): Promise<Metrics>;
   /** Set when the platform has no public API for publishing at all. */
   publishUnsupported?: string;
@@ -55,6 +65,7 @@ const mockMode = (env: Env) => env.MOCK_MODE === "true";
 export class ApiAdapter implements PlatformAdapter {
   readonly id: PlatformId;
   readonly capabilities: Capabilities;
+  readonly mediaConstraints: MediaConstraints;
 
   constructor(
     private readonly spec: PlatformSpec,
@@ -62,6 +73,7 @@ export class ApiAdapter implements PlatformAdapter {
   ) {
     this.id = spec.id;
     this.capabilities = spec.capabilities;
+    this.mediaConstraints = spec.mediaConstraints ?? noMedia;
   }
 
   private get env(): Env {
@@ -120,10 +132,12 @@ export class ApiAdapter implements PlatformAdapter {
   async publish(token: TokenSet, post: PostDraft): Promise<PublishResult> {
     if (this.spec.publishUnsupported) throw new UnsupportedOperation(this.id, "publishing");
     const draft = { ...post, ...(post.perPlatformOverrides?.[this.id] ?? {}) };
-    if (!draft.text.trim()) throw new Error("Post text is required");
+    const media = normalizeMedia(draft);
+    if (!draft.text.trim() && !media.length) throw new Error("Post text is required");
+    validateMedia(this.id, this.capabilities, this.mediaConstraints, media);
     if (mockMode(this.env)) return { platformPostId: `${this.id}-${randomUUID()}`, publishedAt: new Date() };
     if (!this.spec.publish) throw new UnsupportedOperation(this.id, "publishing until its API client is configured");
-    return this.spec.publish(this.context(token), draft);
+    return this.spec.publish(this.context(token), { ...draft, media });
   }
 
   async getAnalytics(token: TokenSet, ref: PostRef): Promise<Metrics> {

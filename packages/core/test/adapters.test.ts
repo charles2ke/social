@@ -115,7 +115,7 @@ describe("publishing", () => {
 
   it("rejects Instagram posts without media", async () => {
     const { doFetch } = stubFetch([]);
-    await expect(createAdapters({ env, fetch: doFetch }).instagram.publish(token, { text: "No media" })).rejects.toThrow(/image or video URL/);
+    await expect(createAdapters({ env, fetch: doFetch }).instagram.publish(token, { text: "No media" })).rejects.toThrow(/image or video/);
   });
 
   it("applies per-platform overrides", async () => {

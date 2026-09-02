@@ -6,6 +6,8 @@ const API = "https://api.linkedin.com";
 export const linkedinSpec: PlatformSpec = {
   id: "linkedin",
   capabilities: { text: true, image: true, video: true, schedule: true, analytics: true },
+  // LinkedIn posts carry up to 9 images or a single video, never both.
+  mediaConstraints: { maxAttachments: 9, allowsMixedKinds: false },
   oauth: {
     authorizeUrl: "https://www.linkedin.com/oauth/v2/authorization",
     tokenUrl: "https://www.linkedin.com/oauth/v2/accessToken",
@@ -19,6 +21,8 @@ export const linkedinSpec: PlatformSpec = {
     return { id: me.sub, name: me.name ?? me.sub, avatarUrl: me.picture };
   },
   async publish(ctx, post) {
+    // Sharing an asset needs the two-step registerUpload flow, which is not implemented, so fail loudly rather than dropping it.
+    if (post.media.length) throw new Error("LinkedIn image and video upload is not implemented yet — publish text only");
     const author = `urn:li:person:${requireExternalId(ctx)}`;
     const created = await ctx.request<{ id: string }>(`${API}/v2/ugcPosts`, {
       method: "POST",
