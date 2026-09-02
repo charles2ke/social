@@ -20,9 +20,11 @@ app.post<{ Body: DraftBody }>("/drafts", async (request, reply) => {
 });
 app.post<{ Params: { id: string }; Body: Partial<DraftBody> }>("/drafts/:id", async (request, reply) => {
   if (!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(request.params.id)) return reply.code(400).send({ error: "Invalid draft id" });
-  const media = resolveMedia(request.body);
+  // Only touch stored media when the update actually carries media fields, so a text-only update keeps existing attachments.
+  const hasMedia = request.body.media !== undefined || request.body.mediaUrls !== undefined;
+  const media = hasMedia ? resolveMedia(request.body) : undefined;
   if (media instanceof Error) return reply.code(400).send({ error: media.message });
-  const draft = store.updateDraft(request.params.id, { ...request.body, media });
+  const draft = store.updateDraft(request.params.id, media ? { ...request.body, media } : request.body);
   return draft ? reply.type("application/json").send(draft) : reply.code(404).send({ error: "Draft not found" });
 });
 app.post<{ Body: DraftBody & { platforms: PlatformId[] } }>("/publish", async (request, reply) => {
