@@ -95,11 +95,12 @@ statement-level pooling (see the commented example in `.env.example`).
 
 | Platform | Publish API / scope | Media | Analytics | Note |
 | --- | --- | --- | --- | --- |
-| Instagram / Facebook | Meta Graph: `/me/accounts`, IG `media` + `media_publish` | image/video | yes | Register at [Meta](https://developers.facebook.com/docs/instagram-platform/content-publishing/). |
+| Instagram | Meta Graph: `/me/accounts`, IG `media` + `media_publish` | image/video, up to 10, media required | yes | Register at [Meta](https://developers.facebook.com/docs/instagram-platform/content-publishing/). |
+| Facebook | Meta Graph: `/me/accounts` | image *or* video, up to 10 | yes | Register at [Meta](https://developers.facebook.com/docs/instagram-platform/content-publishing/). |
 | WhatsApp | Cloud `/{phone-number-id}/messages` | template/text | no | Register [Cloud API](https://developers.facebook.com/docs/whatsapp/cloud-api). |
-| LinkedIn | `/rest/posts`, `w_member_social` | image/video | yes | [LinkedIn apps](https://www.linkedin.com/developers/). |
-| YouTube | Data API v3 resumable `videos.insert` | video | yes | [Google Cloud](https://console.cloud.google.com/). |
-| TikTok | `/v2/post/publish/video/init/` | video | yes | [TikTok developers](https://developers.tiktok.com/). |
+| LinkedIn | `/rest/posts`, `w_member_social` | up to 9 images *or* 1 video | yes | [LinkedIn apps](https://www.linkedin.com/developers/). |
+| YouTube | Data API v3 resumable `videos.insert` | exactly 1 video (required) | yes | [Google Cloud](https://console.cloud.google.com/). |
+| TikTok | `/v2/post/publish/video/init/` | exactly 1 video (required) | yes | [TikTok developers](https://developers.tiktok.com/). |
 | Snapchat | Marketing/Creative API | — | — | Stub: creative publishing access is approval-limited. |
 | Strava | `POST /api/v3/activities` | — | no | [Strava API](https://developers.strava.com/). |
 | Substack | No public write API | — | no | Stub: export content as an email-ready draft; no scraping/automation. |
@@ -109,6 +110,25 @@ Set each client ID/secret in `.env` and configure callback URLs as
 `UnsupportedOperation` errors for unavailable public writes and implement
 rate-limit retry/backoff at the API boundary. Per-platform keys are documented
 in `.env.example`.
+
+## Images and videos
+
+Posts carry typed attachments: `media: [{ url, kind: "image" | "video", altText? }]`.
+`kind` is inferred from the URL extension when you use the legacy
+`mediaUrls: string[]` field, so existing callers keep working — a URL with an
+unrecognised extension must declare its `kind` explicitly. Only `http(s)`
+URLs are accepted; media is referenced by URL and fetched by the platform,
+so the app never proxies uploads.
+
+Every adapter declares `mediaConstraints` (`maxAttachments`,
+`allowsMixedKinds`, `requiresMedia`, `requiresKind`) next to its
+capabilities, and `publish()` rejects incompatible media before contacting a
+platform — for example an image sent to TikTok, ten attachments on LinkedIn,
+or a YouTube post with no video. `GET /platforms` and the MCP
+`list_platforms` tool return those constraints, `POST /media/validate`
+reports per-platform compatibility for a draft (the dashboard uses it to warn
+while you compose), and `POST /publish` returns a per-platform
+`status: "published" | "failed"` instead of failing the whole request.
 
 ## MCP
 
