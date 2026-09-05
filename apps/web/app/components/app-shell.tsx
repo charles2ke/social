@@ -1,26 +1,25 @@
 "use client";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { useSelectedLayoutSegments } from "next/navigation";
 import { useState } from "react";
 import { HomeIcon, MenuIcon, SetupIcon } from "../icons";
 import { ThemeToggle } from "./theme";
 
 const links = [
-  { href: "/", label: "Composer", description: "Write and publish", Icon: HomeIcon },
-  { href: "/setup", label: "Setup", description: "Connect platforms", Icon: SetupIcon },
+  { href: "/", segment: null, label: "Composer", description: "Write and publish", Icon: HomeIcon },
+  { href: "/setup", segment: "setup", label: "Setup", description: "Connect platforms", Icon: SetupIcon },
 ];
 
 /** Sticky top bar plus a sidebar that collapses into a disclosure on small screens. */
 export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) {
-  const pathname = usePathname();
+  const segments = useSelectedLayoutSegments();
   const [open, setOpen] = useState(false);
-  // `trailingSlash` is enabled for the static export, so normalise before comparing.
-  const current = pathname.replace(/\/+$/, "") || "/";
+  const current = segments[0] ?? null;
 
   const nav = (
     <nav className="flex flex-col gap-1" aria-label="Primary">
-      {links.map(({ href, label, description, Icon }) => {
-        const active = current === href;
+      {links.map(({ href, segment, label, description, Icon }) => {
+        const active = current === segment;
         return (
           <Link
             key={href}
