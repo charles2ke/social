@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import rateLimit from "@fastify/rate-limit";
-import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
+import Fastify, { type FastifyError, type FastifyReply, type FastifyRequest } from "fastify";
 import {
   ConfigurationError,
   MediaValidationError,
@@ -63,7 +63,7 @@ app.addHook("onSend", async (_request, reply) => {
   if (!reply.hasHeader("location")) reply.type("application/json");
 });
 
-app.setErrorHandler((error, _request, reply) => {
+app.setErrorHandler((error: FastifyError, _request, reply) => {
   if (error instanceof MediaValidationError) return reply.code(400).send({ error: error.message });
   if (error instanceof UnsupportedOperation) return reply.code(501).send({ error: error.message });
   if (error instanceof ConfigurationError) return reply.code(400).send({ error: error.message });
