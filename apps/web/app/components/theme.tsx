@@ -25,13 +25,18 @@ function apply(theme: Theme) {
 
 export function ThemeToggle() {
   const [theme, setTheme] = useState<Theme>("system");
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
     const stored = localStorage.getItem(storageKey);
-    if (isTheme(stored)) setTheme(stored);
+    const initial = isTheme(stored) ? stored : "system";
+    setTheme(initial);
+    apply(initial);
+    setReady(true);
   }, []);
 
   useEffect(() => {
+    if (!ready) return;
     apply(theme);
     localStorage.setItem(storageKey, theme);
     if (theme !== "system") return;
@@ -40,7 +45,7 @@ export function ThemeToggle() {
     const listener = () => apply("system");
     query.addEventListener("change", listener);
     return () => query.removeEventListener("change", listener);
-  }, [theme]);
+  }, [theme, ready]);
 
   return (
     <div className="inline-flex items-center gap-1 rounded-xl border border-edge bg-surface p-1" role="group" aria-label="Color theme">
