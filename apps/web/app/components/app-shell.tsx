@@ -72,11 +72,9 @@ export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) 
           <div className="sticky top-24">{nav}</div>
         </aside>
         <div className="min-w-0 flex-1">
-          {open ? (
-            <div id="primary-nav" className="mb-6 card p-3 md:hidden">
-              {nav}
-            </div>
-          ) : null}
+          <div id="primary-nav" hidden={!open} className="mb-6 card p-3 md:hidden">
+            {nav}
+          </div>
           {children}
         </div>
       </div>

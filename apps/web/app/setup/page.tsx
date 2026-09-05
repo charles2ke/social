@@ -40,7 +40,11 @@ export default function Setup() {
       .then(async (response) => {
         if (!response.ok) {
           // Outside mock mode every route needs the admin bearer token, which a browser cannot hold safely.
-          setAccountsError(response.status === 401 ? "The API requires an admin token, so connection status is unavailable here." : "");
+          setAccountsError(
+            response.status === 401
+              ? "The API requires an admin token, so connection status is unavailable here."
+              : `The API returned ${response.status}, so connection status is unavailable.`,
+          );
           return [];
         }
         return response.json();
