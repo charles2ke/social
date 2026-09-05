@@ -7,9 +7,15 @@ dashboard published automatically from `main` (see "Deploying the demo to
 GitHub Pages"). It is UI-only: there is no API or database behind it, so
 publishing does nothing.
 
-| Dashboard | Composing a cross-platform post |
-| --- | --- |
-| ![Social dashboard](docs/screenshots/dashboard.png) | ![Compose form with platforms selected](docs/screenshots/compose.png) |
+| Composer (dark) | Composing a post (light) | Setup |
+| --- | --- | --- |
+| ![Social composer in dark mode](docs/screenshots/dashboard.png) | ![Compose form with platforms selected in light mode](docs/screenshots/compose.png) | ![Setup page listing every platform](docs/screenshots/setup.png) |
+
+The dashboard has two pages — **Composer** (`/`) and **Setup** (`/setup`) —
+with light, dark and system themes selectable from the header. Setup shows
+whether the API is reachable, the install commands, the OAuth callback URL to
+register, and a card per platform with its required environment variables and
+a connect link.
 
 ```text
 Web (apps/web) ──► API (apps/api) ──► Core adapters/scheduler (packages/core)

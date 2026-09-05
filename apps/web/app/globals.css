@@ -1,1 +1,68 @@
-:root { color-scheme: dark; font-family: system-ui, sans-serif; } body { margin: 0; background: #101828; color: #f8fafc; } main { max-width: 760px; margin: auto; padding: 3rem 1.5rem; } header, section { background: #1e293b; border-radius: 12px; padding: 1.5rem; margin-bottom: 1rem; } h1 { margin: 0; } textarea { box-sizing: border-box; width: 100%; min-height: 9rem; padding: .75rem; } label { display: inline-block; margin: .25rem .75rem .25rem 0; } button { padding: .65rem 1rem; border: 0; border-radius: 6px; background: #38bdf8; color: #082f49; font-weight: bold; } input[type="url"], input[type="text"] { box-sizing: border-box; width: 100%; padding: .5rem; margin-bottom: .5rem; } fieldset { border: 1px solid #334155; border-radius: 8px; margin: 1rem 0; } .media-list, .media-warnings { list-style: none; padding: 0; } .media-list li { display: flex; align-items: center; gap: .75rem; margin-bottom: .5rem; } .media-list img, .media-list video { width: 96px; height: 96px; object-fit: cover; border-radius: 6px; background: #0f172a; } .media-url { flex: 1; overflow-wrap: anywhere; font-size: .85rem; color: #cbd5f5; } .media-list button { background: #334155; color: #f8fafc; } .media-warnings li { color: #fca5a5; }
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+    --surface: 255 255 255;
+    --surface-muted: 248 250 252;
+    --edge: 226 232 240;
+    --ink: 15 23 42;
+    --ink-muted: 100 116 139;
+    --brand: 14 165 233;
+    --brand-ink: 255 255 255;
+  }
+
+  .dark {
+    color-scheme: dark;
+    --surface: 20 27 45;
+    --surface-muted: 12 17 30;
+    --edge: 40 51 76;
+    --ink: 241 245 249;
+    --ink-muted: 148 163 184;
+    --brand: 56 189 248;
+    --brand-ink: 8 47 73;
+  }
+
+  html {
+    @apply antialiased;
+  }
+
+  body {
+    @apply bg-surface-muted text-ink;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+
+  :focus-visible {
+    @apply outline-none ring-2 ring-brand ring-offset-2 ring-offset-surface-muted;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-2xl border border-edge bg-surface p-6 shadow-card;
+  }
+
+  .field {
+    @apply w-full rounded-xl border border-edge bg-surface-muted px-3 py-2 text-sm text-ink
+      placeholder:text-ink-muted focus:border-brand;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold
+      transition-colors disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  .btn-primary {
+    @apply btn bg-brand text-brand-ink hover:opacity-90;
+  }
+
+  .btn-ghost {
+    @apply btn border border-edge bg-surface text-ink hover:bg-surface-muted;
+  }
+
+  .badge {
+    @apply inline-flex items-center gap-1 rounded-full border border-edge px-2 py-0.5 text-xs font-medium text-ink-muted;
+  }
+}
