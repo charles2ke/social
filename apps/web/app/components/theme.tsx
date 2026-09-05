@@ -31,7 +31,6 @@ export function ThemeToggle() {
     const stored = localStorage.getItem(storageKey);
     const initial = isTheme(stored) ? stored : "system";
     setTheme(initial);
-    apply(initial);
     setReady(true);
   }, []);
 
