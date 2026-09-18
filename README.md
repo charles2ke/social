@@ -32,7 +32,9 @@ Requirements: Node.js 20+, [pnpm](https://pnpm.io) 9, and Docker.
    least-privilege `social_worker` role automatically — see "Database"
    below).
 3. Run `corepack pnpm install`, apply migrations with
-   `corepack pnpm db:migrate`, then `corepack pnpm dev`.
+   `corepack pnpm db:migrate`, then `corepack pnpm dev`. Start the scheduler
+   worker alongside them with `corepack pnpm --filter @social/api run dev:worker`
+   so scheduled posts actually publish.
 4. Open http://localhost:3000. The API runs on port 3001. Use
    `docker compose up --build` to run everything (Postgres + the app) in
    containers with a single command.
@@ -91,6 +93,10 @@ The callback is the only unauthenticated write path, so it is rate limited
 per client IP (`OAUTH_CALLBACK_RATE_LIMIT`, default 20/minute). Platform
 responses and errors are passed through `redactSecrets` so that tokens never
 reach logs or API responses.
+
+Drafts and scheduled posts are stored in Postgres when `DATABASE_URL` is set;
+without it the API falls back to an in-memory store for the mock-mode demo,
+and nothing is published by the worker.
 
 ### API authentication
 
@@ -174,6 +180,36 @@ reports per-platform compatibility for a draft (the dashboard uses it to warn
 while you compose), and `POST /publish` returns a per-platform
 `status: "published" | "failed"` instead of failing the whole request.
 
+## Scheduling
+
+Scheduling is durable: `POST /schedule` writes the post to the `posts` table
+and a **separate scheduler worker process** publishes it.
+
+| Route | Purpose |
+| --- | --- |
+| `POST /schedule` | Queue `{ text, media, platforms, scheduledFor }` (or `{ id, platforms, scheduledFor }` for an existing draft) |
+| `GET /posts?status=scheduled` | List posts, optionally filtered by status |
+| `GET /posts/:id` | A post with its per-platform publish attempts and last error |
+| `POST /posts/:id/cancel` | Cancel a post that the worker has not claimed yet (409 once it is publishing or published) |
+
+Run the worker with `corepack pnpm --filter @social/api run start:worker`
+(`dev:worker` in development, or the `worker` service in
+`docker-compose.yml`). Each tick it:
+
+1. requeues posts whose claim lease expired because their worker died
+   (`releaseStaleClaims`), failing them once `max_attempts` is used up;
+2. claims due posts with `SELECT ... FOR UPDATE SKIP LOCKED`, so any number
+   of worker replicas can poll the same table without double-publishing;
+3. publishes to each target platform that has not already succeeded, writing
+   one `platform_publish_attempts` row per post/platform — the unique
+   `(post_id, platform)` key makes a retry idempotent, so a partially
+   published post never re-posts where it already succeeded;
+4. marks the post `PUBLISHED`, or reschedules it with exponential backoff
+   (`WORKER_POLL_INTERVAL_MS`, `WORKER_BATCH_SIZE`) until `max_attempts`.
+
+Errors stored on a post or an attempt are passed through `redactSecrets`, so
+tokens never reach the database or the API response.
+
 ## MCP
 
 The MCP server shares `@social/core` with the web/API and exposes account,
@@ -192,8 +228,10 @@ does not yet read the connected accounts the API stores in Postgres.
 ## Development
 
 `corepack pnpm lint`, `typecheck`, `test`, and `build` validate all workspaces.
-The scheduler persists per-platform results (including errors), and its queue
-supports cancellation and retries through the API/MCP surface.
+The scheduler worker persists per-platform results (including errors), and
+its queue supports cancellation and bounded retries through the API (see
+"Scheduling"). `apps/api` tests cover the worker loop against a real
+Postgres, so `pnpm test` needs the `postgres` service running.
 
 ### Deploying the demo to GitHub Pages
 

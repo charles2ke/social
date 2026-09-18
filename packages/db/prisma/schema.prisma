@@ -84,15 +84,26 @@ model Post {
   mediaUrls         Json?      @map("media_urls") @db.JsonB
   platformOverrides Json?      @map("platform_overrides") @db.JsonB
   status            PostStatus @default(DRAFT)
+  platforms         Platform[]
   scheduledFor      DateTime?  @map("scheduled_for") @db.Timestamptz
   claimedAt         DateTime?  @map("claimed_at") @db.Timestamptz
   claimedBy         String?    @map("claimed_by")
+  /// Lease deadline for the current claim. A worker that dies mid-publish
+  /// leaves the row PUBLISHING; `releaseStaleClaims` returns it to the queue
+  /// once this passes.
+  claimExpiresAt    DateTime?  @map("claim_expires_at") @db.Timestamptz
+  attemptCount      Int        @default(0) @map("attempt_count")
+  maxAttempts       Int        @default(3) @map("max_attempts")
+  /// Earliest time the next attempt may be claimed (exponential backoff).
+  nextAttemptAt     DateTime?  @map("next_attempt_at") @db.Timestamptz
+  lastError         String?    @map("last_error")
   createdAt         DateTime   @default(now()) @map("created_at") @db.Timestamptz
   updatedAt         DateTime   @updatedAt @map("updated_at") @db.Timestamptz
 
   attempts          PlatformPublishAttempt[]
 
   @@index([status, scheduledFor])
+  @@index([status, claimExpiresAt])
   @@map("posts")
 }
 
@@ -101,8 +112,9 @@ model PlatformPublishAttempt {
   id             String        @id @default(cuid())
   postId         String        @map("post_id")
   post           Post          @relation(fields: [postId], references: [id], onDelete: Cascade)
-  accountId      String        @map("account_id")
-  account        Account       @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  /// Null when publishing failed before an account could be resolved.
+  accountId      String?       @map("account_id")
+  account        Account?      @relation(fields: [accountId], references: [id], onDelete: Cascade)
   platform       Platform
   status         PublishStatus @default(PENDING)
   externalPostId String?       @map("external_post_id")
@@ -110,6 +122,7 @@ model PlatformPublishAttempt {
   attemptedAt    DateTime      @default(now()) @map("attempted_at") @db.Timestamptz
   completedAt    DateTime?     @map("completed_at") @db.Timestamptz
 
+  @@unique([postId, platform])
   @@index([postId])
   @@index([accountId])
   @@map("platform_publish_attempts")
