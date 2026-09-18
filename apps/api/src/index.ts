@@ -42,7 +42,9 @@ const isPostId = (value: string) => /^[0-9a-z-]{8,64}$/i.test(value);
 function validatePlatforms(platforms: unknown): string | undefined {
   if (!Array.isArray(platforms) || !platforms.length) return "At least one platform is required";
   const unknown = platforms.filter((platform) => typeof platform !== "string" || !isPlatform(platform));
-  return unknown.length ? `Unknown platform(s): ${unknown.join(", ")}` : undefined;
+  if (unknown.length) return `Unknown platform(s): ${unknown.join(", ")}`;
+  const duplicates = platforms.filter((platform, index) => platforms.indexOf(platform) !== index);
+  return duplicates.length ? `Duplicate platform(s): ${[...new Set(duplicates)].join(", ")}` : undefined;
 }
 
 /** Merge `media`/`mediaUrls` into typed attachments, returning the validation error instead of throwing. */
