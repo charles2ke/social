@@ -13,11 +13,11 @@ import {
   validateMedia,
   type MediaAttachment,
   type PlatformId,
-  type TokenSet,
 } from "@social/core";
-import { authorizedToken, createAccountRepository } from "./accounts.js";
+import { createAccountRepository } from "./accounts.js";
 import { createState, verifyState } from "./oauth-state.js";
-import { store } from "./store.js";
+import { createPostRepository, type PostStatus } from "./posts.js";
+import { createPublisher } from "./publisher.js";
 
 const mockMode = process.env.MOCK_MODE === "true";
 const adminToken = process.env.ADMIN_TOKEN;
@@ -26,10 +26,26 @@ if (!adminToken && !mockMode) {
 }
 
 const repository = await createAccountRepository();
+const posts = await createPostRepository();
+const publisher = createPublisher(repository, { mockMode });
 const app = Fastify({ logger: false, bodyLimit: Number(process.env.API_BODY_LIMIT ?? 1_048_576) });
 const isPlatform = (value: string): value is PlatformId => (platformIds as readonly string[]).includes(value);
 
 type DraftBody = { text: string; mediaUrls?: string[]; media?: MediaAttachment[] };
+
+const postStatuses = ["draft", "scheduled", "publishing", "published", "failed", "cancelled"] as const;
+const isPostStatus = (value: string): value is PostStatus => (postStatuses as readonly string[]).includes(value);
+/** Accepts both the in-memory repository's UUIDs and Postgres' cuids. */
+const isPostId = (value: string) => /^[0-9a-z-]{8,64}$/i.test(value);
+
+/** Returns the error message for an invalid `platforms` array, or undefined when it is valid. */
+function validatePlatforms(platforms: unknown): string | undefined {
+  if (!Array.isArray(platforms) || !platforms.length) return "At least one platform is required";
+  const unknown = platforms.filter((platform) => typeof platform !== "string" || !isPlatform(platform));
+  if (unknown.length) return `Unknown platform(s): ${unknown.join(", ")}`;
+  const duplicates = platforms.filter((platform, index) => platforms.indexOf(platform) !== index);
+  return duplicates.length ? `Duplicate platform(s): ${[...new Set(duplicates)].join(", ")}` : undefined;
+}
 
 /** Merge `media`/`mediaUrls` into typed attachments, returning the validation error instead of throwing. */
 function resolveMedia(body: Partial<DraftBody>): MediaAttachment[] | Error {
@@ -73,22 +89,80 @@ app.setErrorHandler((error: FastifyError, _request, reply) => {
 });
 
 app.get("/health", async () => ({ ok: true }));
+/** Readiness: unlike /health this fails when a dependency the API needs is down. */
+app.get("/ready", async (_request, reply) => {
+  if (!process.env.DATABASE_URL) return { ok: true, database: "memory" };
+  try {
+    const { getPrismaClient } = await import("@social/db");
+    await getPrismaClient().$queryRaw`SELECT 1`;
+    return { ok: true, database: "up" };
+  } catch {
+    return reply.code(503).send({ ok: false, database: "down" });
+  }
+});
 app.get("/platforms", async () => Object.values(adapters).map(({ id, capabilities, mediaConstraints }) => ({ id, capabilities, mediaConstraints })));
 app.get("/accounts", async () => repository.list());
-app.get("/drafts", async () => store.drafts());
+app.get("/drafts", async () => posts.list("draft"));
 app.post<{ Body: DraftBody }>("/drafts", async (request, reply) => {
   const media = resolveMedia(request.body);
   if (media instanceof Error) return reply.code(400).send({ error: media.message });
-  return reply.code(201).type("application/json").send(store.createDraft({ ...request.body, media }));
+  if (typeof request.body?.text !== "string") return reply.code(400).send({ error: "text is required" });
+  return reply.code(201).type("application/json").send(await posts.create({ text: request.body.text, media }));
 });
 app.post<{ Params: { id: string }; Body: Partial<DraftBody> }>("/drafts/:id", async (request, reply) => {
-  if (!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(request.params.id)) return reply.code(400).send({ error: "Invalid draft id" });
+  if (!isPostId(request.params.id)) return reply.code(400).send({ error: "Invalid draft id" });
   // Only touch stored media when the update actually carries media fields, so a text-only update keeps existing attachments.
   const hasMedia = request.body.media !== undefined || request.body.mediaUrls !== undefined;
   const media = hasMedia ? resolveMedia(request.body) : undefined;
   if (media instanceof Error) return reply.code(400).send({ error: media.message });
-  const draft = store.updateDraft(request.params.id, media ? { ...request.body, media } : request.body);
+  const draft = await posts.update(request.params.id, {
+    ...(request.body.text !== undefined ? { text: request.body.text } : {}),
+    ...(media ? { media } : {}),
+  });
   return draft ? reply.type("application/json").send(draft) : reply.code(404).send({ error: "Draft not found" });
+});
+
+/** Queues a post for the scheduler worker to publish at `scheduledFor`. */
+app.post<{ Body: DraftBody & { platforms: PlatformId[]; scheduledFor: string; id?: string } }>("/schedule", async (request, reply) => {
+  const { platforms, scheduledFor, id } = request.body ?? {};
+  const platformError = validatePlatforms(platforms);
+  if (platformError) return reply.code(400).send({ error: platformError });
+  const when = new Date(scheduledFor ?? "");
+  if (Number.isNaN(when.getTime())) return reply.code(400).send({ error: "scheduledFor must be an ISO 8601 date-time" });
+  const media = resolveMedia(request.body);
+  if (media instanceof Error) return reply.code(400).send({ error: media.message });
+
+  if (id) {
+    if (!isPostId(id)) return reply.code(400).send({ error: "Invalid post id" });
+    // The content changes and the status transition are applied together, and
+    // only from a status that may be queued — a published, cancelled or
+    // already claimed post is reported as a conflict instead.
+    const scheduled = await posts.schedule(id, when, { media, platforms, ...(request.body.text !== undefined ? { text: request.body.text } : {}) });
+    if (!scheduled) return reply.code(404).send({ error: "Post not found" });
+    if (scheduled.status !== "scheduled") return reply.code(409).send({ error: `Post is already ${scheduled.status}`, post: scheduled });
+    return reply.code(201).type("application/json").send(scheduled);
+  }
+  if (typeof request.body.text !== "string") return reply.code(400).send({ error: "text is required" });
+  return reply.code(201).type("application/json").send(await posts.create({ text: request.body.text, media, platforms, scheduledFor: when }));
+});
+
+app.get<{ Querystring: { status?: string } }>("/posts", async (request, reply) => {
+  const { status } = request.query;
+  if (status && !isPostStatus(status)) return reply.code(400).send({ error: `Unknown status: ${status}` });
+  return posts.list(status as PostStatus | undefined);
+});
+app.get<{ Params: { id: string } }>("/posts/:id", async (request, reply) => {
+  if (!isPostId(request.params.id)) return reply.code(400).send({ error: "Invalid post id" });
+  const post = await posts.get(request.params.id);
+  return post ? reply.type("application/json").send(post) : reply.code(404).send({ error: "Post not found" });
+});
+/** Cancelling is a no-op once the worker has claimed the post — its platform calls are already in flight. */
+app.post<{ Params: { id: string } }>("/posts/:id/cancel", async (request, reply) => {
+  if (!isPostId(request.params.id)) return reply.code(400).send({ error: "Invalid post id" });
+  const post = await posts.cancel(request.params.id);
+  if (!post) return reply.code(404).send({ error: "Post not found" });
+  if (post.status !== "cancelled") return reply.code(409).send({ error: `Post is already ${post.status}`, post });
+  return reply.type("application/json").send(post);
 });
 
 app.get<{ Params: { platform: string } }>("/api/oauth/:platform/start", async (request, reply) => {
@@ -117,19 +191,10 @@ app.get<{ Params: { platform: string }; Querystring: { code?: string; state?: st
   },
 );
 
-/** Resolves the token to publish with, falling back to a mock token in mock mode. */
-async function tokenFor(platform: PlatformId): Promise<TokenSet> {
-  const account = await repository.findByPlatform(platform);
-  if (account) return authorizedToken(repository, account, (token) => adapters[platform].refreshToken(token));
-  if (mockMode) return { accessToken: "mock", externalId: `mock-${platform}` };
-  throw new ConfigurationError(platform, `a connected account — visit /api/oauth/${platform}/start`);
-}
-
 app.post<{ Body: DraftBody & { platforms: PlatformId[] } }>("/publish", async (request, reply) => {
   const { platforms, ...body } = request.body;
-  if (!Array.isArray(platforms) || !platforms.length) return reply.code(400).send({ error: "At least one platform is required" });
-  const unknown = platforms.filter((platform) => !isPlatform(platform));
-  if (unknown.length) return reply.code(400).send({ error: `Unknown platform(s): ${unknown.join(", ")}` });
+  const platformError = validatePlatforms(platforms);
+  if (platformError) return reply.code(400).send({ error: platformError });
   const media = resolveMedia(body);
   if (media instanceof Error) return reply.code(400).send({ error: media.message });
   const draft = { ...body, media };
@@ -137,7 +202,7 @@ app.post<{ Body: DraftBody & { platforms: PlatformId[] } }>("/publish", async (r
   return Promise.all(
     platforms.map(async (platform) => {
       try {
-        const result = await adapters[platform].publish(await tokenFor(platform), draft);
+        const result = await publisher.publish(platform, draft);
         return { platform, status: "published" as const, ...result };
       } catch (error) {
         return { platform, status: "failed" as const, error: redactSecrets(error instanceof Error ? error.message : "Publishing failed") };
@@ -159,8 +224,23 @@ app.post<{ Body: DraftBody }>("/media/validate", async (request, reply) => {
 app.get<{ Params: { platform: string; postId: string } }>("/analytics/:platform/:postId", async (request, reply) => {
   const { platform, postId } = request.params;
   if (!isPlatform(platform)) return reply.code(404).send({ error: "Unknown platform" });
-  return adapters[platform].getAnalytics(await tokenFor(platform), { platformPostId: postId });
+  return adapters[platform].getAnalytics(await publisher.tokenFor(platform), { platformPostId: postId });
 });
+
+/** Close the server and the database pool so a rolling deploy drains instead of dropping requests. */
+async function shutdown(signal: string) {
+  console.log(JSON.stringify({ level: "info", msg: "shutting down", signal }));
+  try {
+    await app.close();
+    if (process.env.DATABASE_URL) {
+      const { disconnectPrismaClient } = await import("@social/db");
+      await disconnectPrismaClient();
+    }
+  } finally {
+    process.exit(0);
+  }
+}
+for (const signal of ["SIGTERM", "SIGINT"]) process.once(signal, () => void shutdown(signal));
 
 app.listen({ port: Number(process.env.API_PORT ?? 3001), host: "0.0.0.0" }).catch((error: unknown) => {
   console.error(error);

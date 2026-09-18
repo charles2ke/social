@@ -35,5 +35,24 @@ services:
       postgres:
         condition: service_healthy
 
+  # The scheduler worker runs as its own process so publishing keeps going
+  # independently of the HTTP API, and so it can connect as the
+  # least-privilege social_worker role (WORKER_DATABASE_URL).
+  worker:
+    build: .
+    command: ["sh", "-c", "corepack pnpm --filter @social/api run start:worker"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-social}@postgres:5432/${POSTGRES_DB:-social}
+      # Overrides any host-local WORKER_DATABASE_URL from .env (which points at
+      # localhost and is unreachable from inside the container) with the
+      # social_worker role on the compose network. Set
+      # WORKER_DATABASE_URL_CONTAINER in production to supply real credentials
+      # (e.g. postgresql://social_worker:<password>@db:5432/social?sslmode=require).
+      WORKER_DATABASE_URL: ${WORKER_DATABASE_URL_CONTAINER:-postgresql://social_worker@postgres:5432/${POSTGRES_DB:-social}}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   postgres_data:

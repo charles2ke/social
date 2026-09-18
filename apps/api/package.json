@@ -4,7 +4,9 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "dev:worker": "tsx watch src/worker.ts",
     "start": "node dist/apps/api/src/index.js",
+    "start:worker": "node dist/apps/api/src/worker.js",
     "build": "tsc -p tsconfig.json",
     "lint": "eslint src test",
     "typecheck": "tsc -p tsconfig.json --noEmit",
