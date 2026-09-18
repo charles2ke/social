@@ -94,6 +94,39 @@ describe("runWorkerTick", () => {
     expect(attempt?.error).not.toContain("super-secret-token");
   });
 
+  it("does not republish a platform whose previous attempt was interrupted", async () => {
+    const post = await scheduledPost({ platforms: ["LINKEDIN"] });
+    // A PENDING row is what a crash between the provider call and its outcome
+    // leaves behind — the post may already be live on the platform.
+    await prisma.platformPublishAttempt.create({ data: { postId: post.id, platform: "LINKEDIN", status: "PENDING" } });
+    const publish = vi.fn(published);
+
+    const result = await runWorkerTick({ prisma, publish });
+
+    expect(publish).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ claimed: 1, published: 0, failed: 1 });
+    expect((await prisma.post.findUniqueOrThrow({ where: { id: post.id } })).lastError).toMatch(/outcome is unknown/i);
+  });
+
+  it("fails a post that has no target platforms instead of marking it published", async () => {
+    const post = await scheduledPost({ platforms: [] });
+
+    expect(await runWorkerTick({ prisma, publish: vi.fn(published) })).toMatchObject({ published: 0, failed: 1 });
+    expect((await prisma.post.findUniqueOrThrow({ where: { id: post.id } })).lastError).toMatch(/no target platforms/i);
+  });
+
+  it("does not complete a post whose lease was reaped mid-publish", async () => {
+    const post = await scheduledPost({ platforms: ["LINKEDIN"] });
+    const publish = vi.fn(async () => {
+      // Another worker reaps the expired lease while this publish is in flight.
+      await prisma.post.update({ where: { id: post.id }, data: { status: "SCHEDULED", claimToken: null, claimedBy: null, claimExpiresAt: null } });
+      return { platformPostId: "urn:1", publishedAt: new Date() };
+    });
+
+    expect(await runWorkerTick({ prisma, publish })).toMatchObject({ claimed: 1, published: 0, failed: 0 });
+    expect((await prisma.post.findUniqueOrThrow({ where: { id: post.id } })).status).toBe("SCHEDULED");
+  });
+
   it("requeues a lease abandoned by a dead worker", async () => {
     const post = await scheduledPost({ platforms: ["LINKEDIN"], status: "PUBLISHING", claimedBy: "dead", claimExpiresAt: new Date(Date.now() - 1000) });
 

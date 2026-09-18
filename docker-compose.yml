@@ -44,6 +44,12 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-social}@postgres:5432/${POSTGRES_DB:-social}
+      # Overrides any host-local WORKER_DATABASE_URL from .env (which points at
+      # localhost and is unreachable from inside the container) with the
+      # social_worker role on the compose network. Set
+      # WORKER_DATABASE_URL_CONTAINER in production to supply real credentials
+      # (e.g. postgresql://social_worker:<password>@db:5432/social?sslmode=require).
+      WORKER_DATABASE_URL: ${WORKER_DATABASE_URL_CONTAINER:-postgresql://social_worker@postgres:5432/${POSTGRES_DB:-social}}
     depends_on:
       postgres:
         condition: service_healthy

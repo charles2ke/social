@@ -3,9 +3,10 @@
 -- The worker only needs to:
 --   * read/update `posts` (claim-loop) and `platform_publish_attempts`
 --   * read `accounts` (to know which platform/account a post targets)
---   * read (never write) `oauth_tokens`, and only the columns it needs to
---     make an authenticated publish call — it must never be able to grant
---     itself broader token access than the OAuth callback handler has.
+--   * read `oauth_tokens`, and update only the token columns of an existing
+--     row when a publish has to refresh an expired access token — it must
+--     never be able to create or delete token rows, nor grant itself broader
+--     token access than the OAuth callback handler has.
 --
 -- This script is mounted into the Postgres container's
 -- /docker-entrypoint-initdb.d/ so it runs once, automatically, the first
@@ -41,10 +42,14 @@ GRANT SELECT, INSERT ON public.analytics_snapshots TO social_worker;
 -- Read-only visibility into which account a post/attempt targets.
 GRANT SELECT ON public.accounts TO social_worker;
 
--- Read-only access to encrypted token material so it can make publish
--- calls; it must never be able to INSERT/UPDATE/DELETE tokens (that stays
--- the OAuth callback handler's job, run under the app's own role).
+-- Read access to encrypted token material so it can make publish calls, plus
+-- the narrow ability to rewrite the token columns of an existing row: a
+-- publish whose access token expired refreshes it, and that refreshed token
+-- must be persisted (a rotated refresh token is lost otherwise). Creating or
+-- deleting token rows stays the OAuth callback handler's job, run under the
+-- app's own role.
 GRANT SELECT ON public.oauth_tokens TO social_worker;
+GRANT UPDATE (encrypted_access_token, encrypted_refresh_token, expires_at, updated_at) ON public.oauth_tokens TO social_worker;
 
 -- No sequence/table creation, no DDL, no access to any future tables
 -- unless explicitly granted above.

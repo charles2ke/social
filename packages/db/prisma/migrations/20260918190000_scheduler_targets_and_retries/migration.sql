@@ -1,9 +1,14 @@
 -- Target platforms for a scheduled post, plus the lease/retry bookkeeping the
 -- scheduler worker needs (see packages/db/src/scheduler.ts).
 
+-- `platforms` is non-nullable (it is a required list in the Prisma model).
+-- Rows that predate this migration get an empty array rather than NULL; the
+-- worker refuses to publish such a post and fails it with an explicit error
+-- instead of silently marking it published with no targets.
 -- AlterTable
-ALTER TABLE "posts" ADD COLUMN "platforms" "Platform"[];
+ALTER TABLE "posts" ADD COLUMN "platforms" "Platform"[] NOT NULL DEFAULT ARRAY[]::"Platform"[];
 ALTER TABLE "posts" ADD COLUMN "claim_expires_at" TIMESTAMPTZ;
+ALTER TABLE "posts" ADD COLUMN "claim_token" TEXT;
 ALTER TABLE "posts" ADD COLUMN "attempt_count" INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE "posts" ADD COLUMN "max_attempts" INTEGER NOT NULL DEFAULT 3;
 ALTER TABLE "posts" ADD COLUMN "next_attempt_at" TIMESTAMPTZ;

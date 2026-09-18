@@ -38,6 +38,14 @@ describe("post repository", () => {
     expect(await posts.cancel(post.id)).toMatchObject({ status: "cancelled" });
   });
 
+  it("refuses to requeue a cancelled post", async () => {
+    const posts = createMemoryPostRepository();
+    const post = await posts.create({ text: "hello", platforms: ["linkedin"], scheduledFor: new Date() });
+    await posts.cancel(post.id);
+
+    expect(await posts.schedule(post.id, new Date(Date.now() + 60_000))).toMatchObject({ status: "cancelled" });
+  });
+
   it("returns undefined for an unknown id", async () => {
     const posts = createMemoryPostRepository();
     expect(await posts.get("missing")).toBeUndefined();

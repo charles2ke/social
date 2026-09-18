@@ -137,14 +137,18 @@ container (see `.github/workflows/ci.yml`).
 `packages/db/prisma/init/01-social-worker-role.sql` creates a
 `social_worker` Postgres role scoped to only what the scheduler needs:
 read/write on `posts`, `platform_publish_attempts`, and
-`analytics_snapshots`, read-only on `accounts` and `oauth_tokens`, and
-nothing else. It's applied automatically by the `postgres` service on
+`analytics_snapshots`, read-only on `accounts`, and on `oauth_tokens` read
+plus the narrow ability to update the token columns of an existing row (a
+publish whose access token expired refreshes it and must persist the
+result) — it can never create or delete token rows. It's applied automatically by the `postgres` service on
 first boot (mounted into `/docker-entrypoint-initdb.d`).
 
 To have the scheduler worker connect using this role instead of the
 default superuser, set `WORKER_DATABASE_URL` in `.env` to a connection
-string using the `social_worker` role and have the worker process read
-that variable instead of `DATABASE_URL`. Give the role a real password
+string using the `social_worker` role; the worker prefers it over
+`DATABASE_URL`. Under `docker compose`, the `worker` service already points
+at `social_worker` on the compose network — override it with
+`WORKER_DATABASE_URL_CONTAINER` to supply real credentials. Give the role a real password
 out-of-band in production (`ALTER ROLE social_worker WITH PASSWORD '...'`)
 — never commit one.
 

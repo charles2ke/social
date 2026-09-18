@@ -84,7 +84,7 @@ model Post {
   mediaUrls         Json?      @map("media_urls") @db.JsonB
   platformOverrides Json?      @map("platform_overrides") @db.JsonB
   status            PostStatus @default(DRAFT)
-  platforms         Platform[]
+  platforms         Platform[] @default([])
   scheduledFor      DateTime?  @map("scheduled_for") @db.Timestamptz
   claimedAt         DateTime?  @map("claimed_at") @db.Timestamptz
   claimedBy         String?    @map("claimed_by")
@@ -92,6 +92,10 @@ model Post {
   /// leaves the row PUBLISHING; `releaseStaleClaims` returns it to the queue
   /// once this passes.
   claimExpiresAt    DateTime?  @map("claim_expires_at") @db.Timestamptz
+  /// Identifies the current claim. Lease renewal and completion are
+  /// conditional on it, so a worker whose lease was already reaped can never
+  /// overwrite the state of the claim that replaced it.
+  claimToken        String?    @map("claim_token")
   attemptCount      Int        @default(0) @map("attempt_count")
   maxAttempts       Int        @default(3) @map("max_attempts")
   /// Earliest time the next attempt may be claimed (exponential backoff).

@@ -124,7 +124,11 @@ export async function createPrismaAccountRepository(): Promise<AccountRepository
         encryptedRefreshToken: token.refreshToken ? encrypt(token.refreshToken) : null,
         expiresAt: token.expiresAt ?? null,
       };
-      await prisma.oAuthToken.upsert({ where: { accountId }, create: { accountId, ...encrypted }, update: encrypted });
+      // A refresh only ever rewrites an existing row, so it is issued as a
+      // plain UPDATE: that is all the least-privilege scheduler worker role is
+      // granted on oauth_tokens (see prisma/init/01-social-worker-role.sql).
+      const { count } = await prisma.oAuthToken.updateMany({ where: { accountId }, data: encrypted });
+      if (!count) await prisma.oAuthToken.create({ data: { accountId, ...encrypted } });
     },
   };
 }

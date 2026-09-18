@@ -9,6 +9,8 @@ export {
   completePost,
   failPost,
   pendingPlatforms,
+  publishTargets,
   recordAttempt,
   releaseStaleClaims,
+  renewClaim,
 } from "./scheduler.js";

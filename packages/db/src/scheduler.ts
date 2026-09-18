@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Platform, Post, PrismaClient } from "@prisma/client";
 
 /** Default lease length: how long a claim stays valid before a reaper may take it back. */
@@ -28,11 +29,12 @@ export function backoffDelayMs(attempt: number, base = DEFAULT_RETRY_BACKOFF_MS)
 export async function claimDuePosts(
   prisma: PrismaClient,
   workerId: string,
-  options: { limit?: number; now?: Date; claimTimeoutMs?: number } = {},
+  options: { limit?: number; now?: Date; claimTimeoutMs?: number; claimToken?: string } = {},
 ): Promise<Post[]> {
   const limit = options.limit ?? 1;
   const now = options.now ?? new Date();
   const expiresAt = new Date(now.getTime() + (options.claimTimeoutMs ?? DEFAULT_CLAIM_TIMEOUT_MS));
+  const claimToken = options.claimToken ?? randomUUID();
 
   return prisma.$transaction(
     async (tx) => {
@@ -60,6 +62,7 @@ export async function claimDuePosts(
           claimedBy: workerId,
           claimedAt: now,
           claimExpiresAt: expiresAt,
+          claimToken,
           attemptCount: { increment: 1 },
         },
       });
@@ -78,10 +81,34 @@ export async function claimDuePosts(
 const LEASE_EXPIRED = "Worker lease expired before the post was published";
 
 /**
+ * Extends the lease of a claim that is still being worked on. The worker calls
+ * this while it waits on slow platform calls so a live claim is never mistaken
+ * for an abandoned one. It is conditional on the claim token, so a worker whose
+ * lease was already reaped cannot take the post back from its new owner —
+ * `false` tells the caller to stop publishing.
+ */
+export async function renewClaim(
+  prisma: PrismaClient,
+  postId: string,
+  claimToken: string,
+  options: { now?: Date; claimTimeoutMs?: number } = {},
+): Promise<boolean> {
+  const now = options.now ?? new Date();
+  const { count } = await prisma.post.updateMany({
+    where: { id: postId, status: "PUBLISHING", claimToken },
+    data: { claimExpiresAt: new Date(now.getTime() + (options.claimTimeoutMs ?? DEFAULT_CLAIM_TIMEOUT_MS)) },
+  });
+  return count === 1;
+}
+
+/**
  * Returns posts whose claim lease expired (their worker crashed or was killed
  * mid-publish) to the queue, or gives up on them once they have used up
  * `maxAttempts`. Run this on every worker tick: without it a single crashed
  * worker would strand its claimed posts in PUBLISHING forever.
+ *
+ * Requeuing clears the claim token, which is what stops a merely slow (rather
+ * than dead) worker from later completing or failing the post it lost.
  */
 export async function releaseStaleClaims(
   prisma: PrismaClient,
@@ -90,25 +117,27 @@ export async function releaseStaleClaims(
   const now = options.now ?? new Date();
   const stale = await prisma.post.findMany({
     where: { status: "PUBLISHING", claimExpiresAt: { lte: now } },
-    select: { id: true, attemptCount: true, maxAttempts: true },
+    select: { id: true, attemptCount: true, maxAttempts: true, claimToken: true },
   });
 
   let requeued = 0;
   let failed = 0;
   for (const post of stale) {
     const exhausted = post.attemptCount >= post.maxAttempts;
-    await prisma.post.update({
-      where: { id: post.id },
+    const { count } = await prisma.post.updateMany({
+      where: { id: post.id, status: "PUBLISHING", claimToken: post.claimToken, claimExpiresAt: { lte: now } },
       data: exhausted
-        ? { status: "FAILED", claimedBy: null, claimExpiresAt: null, lastError: LEASE_EXPIRED }
+        ? { status: "FAILED", claimedBy: null, claimExpiresAt: null, claimToken: null, lastError: LEASE_EXPIRED }
         : {
             status: "SCHEDULED",
             claimedBy: null,
             claimExpiresAt: null,
+            claimToken: null,
             nextAttemptAt: new Date(now.getTime() + backoffDelayMs(post.attemptCount)),
             lastError: LEASE_EXPIRED,
           },
     });
+    if (!count) continue;
     if (exhausted) failed += 1;
     else requeued += 1;
   }
@@ -116,55 +145,65 @@ export async function releaseStaleClaims(
 }
 
 /**
- * Marks a claimed post's outcome after a publish attempt. Intended to be
- * called by the scheduler once the platform adapters have run.
+ * Marks a claimed post's outcome after a publish attempt. The update is
+ * conditional on the post still being PUBLISHING under the caller's claim
+ * token, so a worker whose lease was reaped cannot overwrite the newer claim;
+ * `null` is returned when the claim was lost.
  */
 export async function completePost(
   prisma: PrismaClient,
   postId: string,
   status: "PUBLISHED" | "FAILED",
-): Promise<Post> {
-  return prisma.post.update({
-    where: { id: postId },
+  options: { claimToken?: string } = {},
+): Promise<Post | null> {
+  const where = { id: postId, status: "PUBLISHING" as const, ...(options.claimToken ? { claimToken: options.claimToken } : {}) };
+  const { count } = await prisma.post.updateMany({
+    where,
     data: {
       status,
       claimExpiresAt: null,
+      claimToken: null,
       nextAttemptAt: null,
       ...(status === "PUBLISHED" ? { lastError: null } : {}),
     },
   });
+  return count ? prisma.post.findUnique({ where: { id: postId } }) : null;
 }
 
 /**
  * Records a failed attempt: reschedules the post with exponential backoff
  * while attempts remain, and marks it FAILED once they are exhausted.
+ *
+ * The attempt count is read and the row updated in one transaction, both
+ * conditional on the caller's claim, so a delayed worker cannot reschedule a
+ * post that has already been reclaimed by another worker.
  */
 export async function failPost(
   prisma: PrismaClient,
   postId: string,
   error: string,
-  options: { now?: Date; backoffMs?: number } = {},
-): Promise<Post> {
+  options: { now?: Date; backoffMs?: number; claimToken?: string } = {},
+): Promise<Post | null> {
   const now = options.now ?? new Date();
-  const post = await prisma.post.findUniqueOrThrow({
-    where: { id: postId },
-    select: { attemptCount: true, maxAttempts: true },
-  });
-  if (post.attemptCount >= post.maxAttempts) {
-    return prisma.post.update({
-      where: { id: postId },
-      data: { status: "FAILED", claimedBy: null, claimExpiresAt: null, lastError: error },
+  const where = { id: postId, status: "PUBLISHING" as const, ...(options.claimToken ? { claimToken: options.claimToken } : {}) };
+  return prisma.$transaction(async (tx) => {
+    const post = await tx.post.findFirst({ where, select: { attemptCount: true, maxAttempts: true } });
+    if (!post) return null;
+    const exhausted = post.attemptCount >= post.maxAttempts;
+    const { count } = await tx.post.updateMany({
+      where,
+      data: exhausted
+        ? { status: "FAILED", claimedBy: null, claimExpiresAt: null, claimToken: null, lastError: error }
+        : {
+            status: "SCHEDULED",
+            claimedBy: null,
+            claimExpiresAt: null,
+            claimToken: null,
+            lastError: error,
+            nextAttemptAt: new Date(now.getTime() + backoffDelayMs(post.attemptCount, options.backoffMs)),
+          },
     });
-  }
-  return prisma.post.update({
-    where: { id: postId },
-    data: {
-      status: "SCHEDULED",
-      claimedBy: null,
-      claimExpiresAt: null,
-      lastError: error,
-      nextAttemptAt: new Date(now.getTime() + backoffDelayMs(post.attemptCount, options.backoffMs)),
-    },
+    return count ? tx.post.findUnique({ where: { id: postId } }) : null;
   });
 }
 
@@ -211,4 +250,34 @@ export async function pendingPlatforms(
   });
   const done = new Set(published.map((row) => row.platform));
   return platforms.filter((platform) => !done.has(platform));
+}
+
+/**
+ * Splits a post's target platforms into the ones a retry may publish and the
+ * ones whose outcome is unknown.
+ *
+ * A PENDING attempt row was written immediately before the provider call, so
+ * it means the process died in the window where the platform may already have
+ * accepted the post. Republishing would risk a duplicate external post, so
+ * those platforms are reported separately for reconciliation instead.
+ */
+export async function publishTargets(
+  prisma: PrismaClient,
+  postId: string,
+  platforms: Platform[],
+): Promise<{ pending: Platform[]; unconfirmed: Platform[] }> {
+  const attempts = await prisma.platformPublishAttempt.findMany({
+    where: { postId },
+    select: { platform: true, status: true },
+  });
+  const status = new Map(attempts.map((attempt) => [attempt.platform, attempt.status]));
+  const pending: Platform[] = [];
+  const unconfirmed: Platform[] = [];
+  for (const platform of platforms) {
+    const recorded = status.get(platform);
+    if (recorded === "SUCCESS") continue;
+    if (recorded === "PENDING") unconfirmed.push(platform);
+    else pending.push(platform);
+  }
+  return { pending, unconfirmed };
 }

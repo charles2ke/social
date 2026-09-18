@@ -6,8 +6,10 @@ import {
   completePost,
   failPost,
   pendingPlatforms,
+  publishTargets,
   recordAttempt,
   releaseStaleClaims,
+  renewClaim,
 } from "../src/scheduler.js";
 import { testDatabaseUrl } from "./setup.js";
 
@@ -91,16 +93,25 @@ describe("failPost", () => {
 
     const failed = await failPost(prisma, post.id, "linkedin: 500", { now, backoffMs: 1000 });
 
-    expect(failed.status).toBe("SCHEDULED");
-    expect(failed.lastError).toBe("linkedin: 500");
-    expect(failed.nextAttemptAt?.getTime()).toBe(now.getTime() + 1000);
+    expect(failed?.status).toBe("SCHEDULED");
+    expect(failed?.lastError).toBe("linkedin: 500");
+    expect(failed?.nextAttemptAt?.getTime()).toBe(now.getTime() + 1000);
   });
 
   it("gives up once maxAttempts is used", async () => {
     const post = await duePost({ attemptCount: 2, maxAttempts: 3 });
     await claimDuePosts(prisma, "worker-a");
 
-    expect((await failPost(prisma, post.id, "linkedin: 500")).status).toBe("FAILED");
+    expect((await failPost(prisma, post.id, "linkedin: 500"))?.status).toBe("FAILED");
+  });
+
+  it("does not reschedule a post whose claim was already reaped", async () => {
+    const post = await duePost();
+    const [claimed] = await claimDuePosts(prisma, "slow-worker", { claimTimeoutMs: -1 });
+    await releaseStaleClaims(prisma);
+
+    expect(await failPost(prisma, post.id, "linkedin: 500", { claimToken: claimed?.claimToken ?? "" })).toBeNull();
+    expect((await prisma.post.findUniqueOrThrow({ where: { id: post.id } })).lastError).toMatch(/lease expired/i);
   });
 
   it("backs off exponentially and stays capped at a day", () => {
@@ -138,8 +149,48 @@ describe("completePost", () => {
 
     const published = await completePost(prisma, post.id, "PUBLISHED");
 
-    expect(published.status).toBe("PUBLISHED");
-    expect(published.claimExpiresAt).toBeNull();
-    expect(published.lastError).toBeNull();
+    expect(published?.status).toBe("PUBLISHED");
+    expect(published?.claimExpiresAt).toBeNull();
+    expect(published?.lastError).toBeNull();
+  });
+
+  it("refuses to publish under a claim token that is no longer current", async () => {
+    const post = await duePost();
+    const [claimed] = await claimDuePosts(prisma, "slow-worker", { claimTimeoutMs: -1 });
+    await releaseStaleClaims(prisma);
+    await claimDuePosts(prisma, "worker-b", { now: new Date(Date.now() + 60 * 60_000) });
+
+    expect(await completePost(prisma, post.id, "PUBLISHED", { claimToken: claimed?.claimToken ?? "" })).toBeNull();
+    expect((await prisma.post.findUniqueOrThrow({ where: { id: post.id } })).claimedBy).toBe("worker-b");
+  });
+});
+
+describe("renewClaim", () => {
+  it("extends a live lease so a slow worker is not reaped", async () => {
+    const post = await duePost();
+    const [claimed] = await claimDuePosts(prisma, "worker-a", { claimTimeoutMs: 1000 });
+
+    expect(await renewClaim(prisma, post.id, claimed?.claimToken ?? "", { claimTimeoutMs: 60_000 })).toBe(true);
+    expect(await releaseStaleClaims(prisma)).toEqual({ requeued: 0, failed: 0 });
+  });
+
+  it("reports a lost lease once the claim was requeued", async () => {
+    const post = await duePost();
+    const [claimed] = await claimDuePosts(prisma, "worker-a", { claimTimeoutMs: -1 });
+    await releaseStaleClaims(prisma);
+
+    expect(await renewClaim(prisma, post.id, claimed?.claimToken ?? "")).toBe(false);
+  });
+});
+
+describe("publishTargets", () => {
+  it("keeps a platform interrupted mid-publish out of the retry", async () => {
+    const post = await duePost({ platforms: ["LINKEDIN", "FACEBOOK"] });
+    await recordAttempt(prisma, { postId: post.id, platform: "LINKEDIN", status: "PENDING" });
+
+    expect(await publishTargets(prisma, post.id, ["LINKEDIN", "FACEBOOK"])).toEqual({
+      pending: ["FACEBOOK"],
+      unconfirmed: ["LINKEDIN"],
+    });
   });
 });

@@ -134,9 +134,13 @@ app.post<{ Body: DraftBody & { platforms: PlatformId[]; scheduledFor: string; id
 
   if (id) {
     if (!isPostId(id)) return reply.code(400).send({ error: "Invalid post id" });
-    const updated = await posts.update(id, { media, platforms, ...(request.body.text !== undefined ? { text: request.body.text } : {}) });
-    if (!updated) return reply.code(404).send({ error: "Post not found" });
-    return reply.code(201).type("application/json").send(await posts.schedule(id, when));
+    // The content changes and the status transition are applied together, and
+    // only from a status that may be queued — a published, cancelled or
+    // already claimed post is reported as a conflict instead.
+    const scheduled = await posts.schedule(id, when, { media, platforms, ...(request.body.text !== undefined ? { text: request.body.text } : {}) });
+    if (!scheduled) return reply.code(404).send({ error: "Post not found" });
+    if (scheduled.status !== "scheduled") return reply.code(409).send({ error: `Post is already ${scheduled.status}`, post: scheduled });
+    return reply.code(201).type("application/json").send(scheduled);
   }
   if (typeof request.body.text !== "string") return reply.code(400).send({ error: "text is required" });
   return reply.code(201).type("application/json").send(await posts.create({ text: request.body.text, media, platforms, scheduledFor: when }));

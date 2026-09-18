@@ -22,10 +22,23 @@ export interface PostRepository {
   get(id: string): Promise<StoredPost | undefined>;
   create(input: PostInput): Promise<StoredPost>;
   update(id: string, changes: Partial<PostInput>): Promise<StoredPost | undefined>;
-  /** Moves a draft (or an already scheduled post) into the worker's queue. */
-  schedule(id: string, scheduledFor: Date): Promise<StoredPost | undefined>;
+  /**
+   * Moves a draft (or an already scheduled post) into the worker's queue,
+   * applying `changes` in the same transition. Returns the post unchanged when
+   * its status does not allow scheduling, so the caller can report a conflict.
+   */
+  schedule(id: string, scheduledFor: Date, changes?: Partial<PostInput>): Promise<StoredPost | undefined>;
+  /** Returns the post unchanged when it is already claimed or terminal. */
   cancel(id: string): Promise<StoredPost | undefined>;
 }
+
+/**
+ * Lifecycle guard: a post may only be (re)queued or cancelled while it is not
+ * claimed by the worker and not in a terminal state — a published post must
+ * never be silently requeued, and a cancelled one must not be republished.
+ */
+const schedulable = new Set<PostStatus>(["draft", "scheduled", "failed"]);
+const cancellable = new Set<PostStatus>(["draft", "scheduled", "failed"]);
 
 const draftOf = (post: StoredPost): PostDraft => ({ id: post.id, text: post.text, media: post.media });
 export { draftOf };
@@ -66,14 +79,23 @@ export function createMemoryPostRepository(): PostRepository {
         ...(changes.scheduledFor !== undefined ? { scheduledFor: changes.scheduledFor.toISOString() } : {}),
       });
     },
-    async schedule(id, scheduledFor) {
+    async schedule(id, scheduledFor, changes) {
       const post = posts.get(id);
       if (!post) return undefined;
-      return put({ ...post, status: "scheduled", scheduledFor: scheduledFor.toISOString() });
+      if (!schedulable.has(post.status)) return post;
+      return put({
+        ...post,
+        ...(changes?.text !== undefined ? { text: changes.text } : {}),
+        ...(changes?.media !== undefined ? { media: changes.media } : {}),
+        ...(changes?.platforms !== undefined ? { platforms: changes.platforms } : {}),
+        status: "scheduled",
+        scheduledFor: scheduledFor.toISOString(),
+      });
     },
     async cancel(id) {
       const post = posts.get(id);
       if (!post) return undefined;
+      if (!cancellable.has(post.status)) return post;
       return put({ ...post, status: "cancelled" });
     },
   };
@@ -163,27 +185,36 @@ export async function createPrismaPostRepository(): Promise<PostRepository> {
       });
       return toPost(row);
     },
-    async schedule(id, scheduledFor) {
-      if (!(await find(id))) return undefined;
-      const row = await prisma.post.update({
-        where: { id },
-        data: { status: "SCHEDULED", scheduledFor, nextAttemptAt: null, claimExpiresAt: null },
-        include: { attempts: true },
+    async schedule(id, scheduledFor, changes) {
+      // Conditional on the current status so a published, cancelled or
+      // in-flight post is never requeued by a racing request; the caller sees
+      // the unchanged row and reports a conflict.
+      await prisma.post.updateMany({
+        where: { id, status: { in: [...schedulable].map(toStatusEnum) } },
+        data: {
+          ...(changes?.text !== undefined ? { content: changes.text } : {}),
+          ...(changes?.media !== undefined ? { mediaUrls: changes.media as unknown as object } : {}),
+          ...(changes?.platforms !== undefined ? { platforms: changes.platforms.map(toPlatformEnum) } : {}),
+          status: "SCHEDULED",
+          scheduledFor,
+          nextAttemptAt: null,
+          claimExpiresAt: null,
+          claimToken: null,
+        },
       });
-      return toPost(row);
+      const row = await find(id);
+      return row ? toPost(row) : undefined;
     },
     async cancel(id) {
-      const existing = await find(id);
-      if (!existing) return undefined;
       // A post the worker already claimed is mid-publish; cancelling it would
-      // not stop the in-flight platform calls, so it is refused.
-      if (existing.status === "PUBLISHING" || existing.status === "PUBLISHED") return toPost(existing);
-      const row = await prisma.post.update({
-        where: { id },
-        data: { status: "CANCELLED", scheduledFor: null, nextAttemptAt: null, claimExpiresAt: null },
-        include: { attempts: true },
+      // not stop the in-flight platform calls, so the update is conditional on
+      // a still-cancellable status rather than on a separate status read.
+      await prisma.post.updateMany({
+        where: { id, status: { in: [...cancellable].map(toStatusEnum) } },
+        data: { status: "CANCELLED", scheduledFor: null, nextAttemptAt: null, claimExpiresAt: null, claimToken: null },
       });
-      return toPost(row);
+      const row = await find(id);
+      return row ? toPost(row) : undefined;
     },
   };
 }
