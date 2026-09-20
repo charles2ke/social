@@ -108,8 +108,8 @@ them, including per-platform OAuth credentials. The ones that matter most:
 | --- | --- | --- |
 | `MOCK_MODE` | `false` | Run every adapter against local mocks — no credentials needed (`.env.example` sets it to `true` for the demo) |
 | `ENCRYPTION_KEY` | — | 64 hex chars (`openssl rand -hex 32`), AES-256-GCM key for stored tokens |
-| `ADMIN_TOKEN` | — | Admin credential sent as an `Authorization` header on every API route outside mock mode |
-| `DATABASE_URL` | local Postgres | Prisma connection string; without it the API uses an in-memory store |
+| `ADMIN_TOKEN` | — | Admin credential sent as an `Authorization` header on every API route outside mock mode, except `/health` and the OAuth callback |
+| `DATABASE_URL` | — | Prisma connection string; without it the API uses an in-memory store |
 | `WORKER_DATABASE_URL` | `DATABASE_URL` | Least-privilege connection string for the worker |
 | `BASE_URL` | — | Public API URL used to build OAuth callback URLs (`OAUTH_REDIRECT_BASE_URL` overrides it) |
 | `API_PORT` | `3001` | Port the API listens on |
