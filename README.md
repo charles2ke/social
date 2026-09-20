@@ -106,7 +106,7 @@ them, including per-platform OAuth credentials. The ones that matter most:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `MOCK_MODE` | `true` | Run every adapter against local mocks — no credentials needed |
+| `MOCK_MODE` | `false` | Run every adapter against local mocks — no credentials needed (`.env.example` sets it to `true` for the demo) |
 | `ENCRYPTION_KEY` | — | 64 hex chars (`openssl rand -hex 32`), AES-256-GCM key for stored tokens |
 | `ADMIN_TOKEN` | — | Admin credential sent as an `Authorization` header on every API route outside mock mode |
 | `DATABASE_URL` | local Postgres | Prisma connection string; without it the API uses an in-memory store |
