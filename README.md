@@ -17,6 +17,37 @@ whether the API is reachable, the install commands, the OAuth callback URL to
 register, and a card per platform with its required environment variables and
 a connect link.
 
+## Features
+
+- **Compose once, publish everywhere** — one draft fans out to Facebook,
+  Instagram, LinkedIn, WhatsApp, YouTube, TikTok and Strava, with per-platform
+  text overrides.
+- **Durable scheduling** — queued posts live in Postgres and are published by a
+  separate worker with claim leases, retries with backoff, and cancellation.
+- **Media validation up front** — attachments are checked against each
+  platform's constraints before anything is sent.
+- **Encrypted credentials** — OAuth tokens are AES-256-GCM encrypted at rest,
+  refreshed automatically, and redacted from logs and API responses.
+- **Mock mode** — a full end-to-end demo with no platform credentials.
+- **MCP server** — drive drafts, publishing and analytics from an MCP client
+  such as Claude Desktop or VS Code.
+- **Self-hosted** — AGPL-3.0, runs from a single `docker compose up`.
+
+## Contents
+
+- [Quick start](#quick-start)
+- [Repository layout](#repository-layout)
+- [Configuration](#configuration)
+- [Platform integrations](#platform-integrations)
+- [API reference](#api-reference)
+- [Database](#database)
+- [Images and videos](#images-and-videos)
+- [Scheduling](#scheduling)
+- [MCP](#mcp)
+- [Development](#development)
+- [Troubleshooting](#troubleshooting)
+- [Contributing, security and license](#contributing-security-and-license)
+
 ```text
 Web (apps/web) ──► API (apps/api) ──► Core adapters/scheduler (packages/core)
 MCP stdio server ───────────────────► Core adapters/scheduler
@@ -44,6 +75,47 @@ so you get a working end-to-end demo with **no social platform credentials
 configured**. Production deployments must use HTTPS, a strong `ADMIN_TOKEN`,
 and platform credentials. Tokens are encrypted with AES-256-GCM before
 persistence; errors must not include token values.
+
+## Repository layout
+
+A pnpm workspace monorepo:
+
+| Path | Contents |
+| --- | --- |
+| [`apps/web`](apps/web) | Next.js dashboard (Composer and Setup pages) |
+| [`apps/api`](apps/api) | Fastify API (`src/index.ts`) and scheduler worker (`src/worker.ts`) |
+| [`packages/core`](packages/core) | Platform adapters, OAuth, crypto, media rules, shared types |
+| [`packages/db`](packages/db) | Prisma schema, migrations, scheduler claim loop |
+| [`packages/mcp-server`](packages/mcp-server) | MCP stdio server |
+| [`docs/adr`](docs/adr) | Architecture decision records |
+
+Workspace scripts (run from the root, prefixed with `corepack pnpm`):
+
+| Script | Purpose |
+| --- | --- |
+| `dev` | Run the web app and API together |
+| `build`, `lint`, `typecheck`, `test` | Validate every workspace |
+| `db:generate` | Generate the Prisma client (needed before `typecheck`) |
+| `db:migrate` | Apply migrations |
+| `db:studio` | Open Prisma Studio |
+
+## Configuration
+
+Every setting lives in `.env` — [`.env.example`](.env.example) documents all of
+them, including per-platform OAuth credentials. The ones that matter most:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MOCK_MODE` | `false` | Run every adapter against local mocks — no credentials needed (`.env.example` sets it to `true` for the demo) |
+| `ENCRYPTION_KEY` | — | 64 hex chars (`openssl rand -hex 32`), AES-256-GCM key for stored tokens |
+| `ADMIN_TOKEN` | — | Admin credential sent as an `Authorization` header on every API route outside mock mode, except `/health` and the OAuth callback |
+| `DATABASE_URL` | — | Prisma connection string; without it the API uses an in-memory store |
+| `WORKER_DATABASE_URL` | `DATABASE_URL` | Least-privilege connection string for the worker |
+| `BASE_URL` | — | Public API URL used to build OAuth callback URLs (`OAUTH_REDIRECT_BASE_URL` overrides it) |
+| `API_PORT` | `3001` | Port the API listens on |
+| `OAUTH_STATE_SECRET` | `ADMIN_TOKEN` or `ENCRYPTION_KEY` | HMAC key signing the OAuth `state` value |
+| `WORKER_POLL_INTERVAL_MS` | `15000` | Scheduler tick cadence |
+| `WORKER_BATCH_SIZE` | `5` | Posts claimed per tick |
 
 ## Platform integrations
 
@@ -106,6 +178,23 @@ an `Authorization` header carrying `ADMIN_TOKEN` as a bearer token. The API
 refuses to start without it.
 Because a browser cannot hold that token safely, serve the dashboard behind
 your own authenticated proxy when `ADMIN_TOKEN` is set.
+
+## API reference
+
+| Route | Purpose |
+| --- | --- |
+| `GET /health` | Liveness probe (public) |
+| `GET /ready` | Readiness, including database connectivity |
+| `GET /platforms` | Supported platforms, capabilities and media constraints |
+| `GET /accounts` | Connected accounts (tokens are never returned) |
+| `GET /api/oauth/:platform/start` | Redirect to the platform's consent screen |
+| `GET /api/oauth/:platform/callback` | OAuth callback (authenticated by its signed `state`) |
+| `GET /drafts`, `POST /drafts`, `POST /drafts/:id` | List, create and update drafts |
+| `POST /media/validate` | Per-platform compatibility report for a draft's media |
+| `POST /publish` | Publish now; returns a per-platform `status` |
+| `POST /schedule` | Queue a post for the worker |
+| `GET /posts`, `GET /posts/:id`, `POST /posts/:id/cancel` | Inspect and cancel queued posts |
+| `GET /analytics/:platform/:postId` | Metrics for a published post |
 
 ## Database
 
@@ -257,3 +346,27 @@ NEXT_STATIC_EXPORT=true NEXT_BASE_PATH=/social corepack pnpm --filter @social/we
 The result lands in `apps/web/out`. Because Pages serves static files only,
 the deployed dashboard has no API to call — run the full stack locally or
 self-host it for a working install.
+
+## Troubleshooting
+
+| Symptom | Fix |
+| --- | --- |
+| `typecheck` fails in `packages/db` with missing `@prisma/client` exports | Run `corepack pnpm db:generate` first |
+| `pnpm test` fails to connect to Postgres | Start it with `docker compose up -d postgres` — `apps/api` and `packages/db` tests use a real database |
+| API exits at startup complaining about `ADMIN_TOKEN` | Set `ADMIN_TOKEN`, or keep `MOCK_MODE=true` for the demo |
+| Scheduled posts stay `SCHEDULED` | The worker is not running (`corepack pnpm --filter @social/api run dev:worker`) or `DATABASE_URL` is unset, so posts only live in memory |
+| OAuth callback returns an error | The registered callback must match `BASE_URL/api/oauth/<platform>/callback` exactly, and `BASE_URL` must be reachable by the platform |
+| Connecting Facebook/Instagram fails with "no Page" | The authorizing user must administer a Page; set `FACEBOOK_PAGE_ID` / `INSTAGRAM_PAGE_ID` when there are several |
+
+## Contributing, security and license
+
+Issues and pull requests are welcome. Before opening one, run
+`corepack pnpm lint`, `typecheck`, `test` and `build`, and keep changes
+focused. Architectural decisions are recorded in [`docs/adr`](docs/adr).
+
+Report vulnerabilities privately as described in
+[`SECURITY.md`](SECURITY.md) — never in a public issue. Never commit real
+credentials; `.env` is git-ignored and `.env.example` holds placeholders only.
+
+Licensed under the [GNU AGPL-3.0](LICENSE): if you run a modified version as a
+network service, you must offer its source to users of that service.
