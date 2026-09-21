@@ -95,6 +95,9 @@ export const platforms: PlatformMeta[] = [
 
 export const platformIds = platforms.map((platform) => platform.id);
 
+/** Platforms the API can actually publish to — the rest always raise `UnsupportedOperation`. */
+export const publishablePlatformIds = platforms.filter((platform) => !platform.unsupported).map((platform) => platform.id);
+
 const byId = new Map(platforms.map((platform) => [platform.id, platform]));
 
 export function platformMeta(id: string): PlatformMeta {

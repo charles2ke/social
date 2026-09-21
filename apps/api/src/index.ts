@@ -62,6 +62,33 @@ const isPublicRoute = (url: string) => url === "/health" || isCallback(url);
 const callbackRateLimit = { max: Number(process.env.OAUTH_CALLBACK_RATE_LIMIT ?? 20), timeWindow: "1 minute" };
 await app.register(rateLimit, { max: Number(process.env.API_RATE_LIMIT ?? 300), timeWindow: "1 minute" });
 
+/**
+ * The dashboard is served from a different origin than the API (3000 vs 3001),
+ * so browsers need an explicit allow-list. `WEB_ORIGIN` takes a comma-separated
+ * list of origins; mock mode defaults to the local dashboard so `pnpm dev`
+ * works out of the box. Credentials are never allowed, and an unlisted origin
+ * simply gets no CORS headers.
+ */
+const allowedOrigins = new Set(
+  (process.env.WEB_ORIGIN ?? (mockMode ? "http://localhost:3000" : ""))
+    .split(",")
+    .map((origin) => origin.trim().replace(/\/$/, ""))
+    .filter(Boolean),
+);
+
+app.addHook("onRequest", async (request: FastifyRequest, reply: FastifyReply) => {
+  const origin = request.headers.origin;
+  if (!origin || !allowedOrigins.has(origin.replace(/\/$/, ""))) return;
+  reply.header("Access-Control-Allow-Origin", origin);
+  reply.header("Vary", "Origin");
+  if (request.method !== "OPTIONS") return;
+  // Preflights carry no Authorization header, so they are answered before the admin check below.
+  reply.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  reply.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  reply.header("Access-Control-Max-Age", "600");
+  return reply.code(204).send();
+});
+
 app.addHook("onRequest", async (request: FastifyRequest, reply: FastifyReply) => {
   if (isPublicRoute(request.url) || !adminToken) return;
   const header = request.headers.authorization ?? "";
