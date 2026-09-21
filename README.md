@@ -12,7 +12,10 @@ publishing does nothing.
 | ![Social composer in dark mode](docs/screenshots/dashboard.png) | ![Compose form with platforms selected in light mode](docs/screenshots/compose.png) | ![Setup page listing every platform](docs/screenshots/setup.png) |
 
 The dashboard has two pages — **Composer** (`/`) and **Setup** (`/setup`) —
-with light, dark and system themes selectable from the header. Setup shows
+with light, dark and system themes selectable from the header. Composer
+writes the post, attaches media by URL (with previews and live per-platform
+compatibility warnings), picks the target platforms, and either publishes
+immediately or queues the post for a date and time you choose. Setup shows
 whether the API is reachable, the install commands, the OAuth callback URL to
 register, and a card per platform with its required environment variables and
 a connect link.
@@ -24,6 +27,7 @@ a connect link.
   text overrides.
 - **Durable scheduling** — queued posts live in Postgres and are published by a
   separate worker with claim leases, retries with backoff, and cancellation.
+  Schedule from the dashboard, the API, or an MCP client.
 - **Media validation up front** — attachments are checked against each
   platform's constraints before anything is sent.
 - **Encrypted credentials** — OAuth tokens are AES-256-GCM encrypted at rest,
@@ -112,6 +116,7 @@ them, including per-platform OAuth credentials. The ones that matter most:
 | `DATABASE_URL` | — | Prisma connection string; without it the API uses an in-memory store |
 | `WORKER_DATABASE_URL` | `DATABASE_URL` | Least-privilege connection string for the worker |
 | `BASE_URL` | — | Public API URL used to build OAuth callback URLs (`OAUTH_REDIRECT_BASE_URL` overrides it) |
+| `WEB_ORIGIN` | `http://localhost:3000` in mock mode | Comma-separated browser origins allowed to call the API (CORS); unset outside mock mode means no cross-origin browser access |
 | `API_PORT` | `3001` | Port the API listens on |
 | `OAUTH_STATE_SECRET` | `ADMIN_TOKEN` or `ENCRYPTION_KEY` | HMAC key signing the OAuth `state` value |
 | `WORKER_POLL_INTERVAL_MS` | `15000` | Scheduler tick cadence |
@@ -276,7 +281,9 @@ while you compose), and `POST /publish` returns a per-platform
 ## Scheduling
 
 Scheduling is durable: `POST /schedule` writes the post to the `posts` table
-and a **separate scheduler worker process** publishes it.
+and a **separate scheduler worker process** publishes it. In the dashboard,
+tick **Schedule for later** in the composer and pick a date and time (entered
+in your local time zone and sent to the API as UTC).
 
 | Route | Purpose |
 | --- | --- |
