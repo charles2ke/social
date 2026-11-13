@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Platform, Post, PrismaClient } from "@prisma/client";
+import type { Platform, Post, Prisma, PrismaClient } from "@prisma/client";
 
 /** Default lease length: how long a claim stays valid before a reaper may take it back. */
 export const DEFAULT_CLAIM_TIMEOUT_MS = 5 * 60_000;
@@ -78,6 +78,51 @@ export async function claimDuePosts(
   );
 }
 
+/** Statuses a post may be claimed from for an immediate, user-requested publish. */
+const CLAIMABLE_NOW_STATUSES = ["DRAFT", "SCHEDULED", "FAILED"] as const;
+
+/**
+ * Claims one specific post for an immediate publish ("publish now"), applying
+ * `data` in the same statement. Unlike `claimDuePosts` it ignores the schedule
+ * and any backoff: the user asked for the post to go out now.
+ *
+ * It is a single conditional UPDATE, so it is atomic with respect to the
+ * worker's `FOR UPDATE SKIP LOCKED` claim and to a concurrent publish-now
+ * request — whichever runs first wins and the other sees a non-claimable
+ * status and gets `null`. The claim starts a fresh retry budget and sets
+ * `scheduledFor` to now, so if the claimer dies mid-publish the reaper
+ * requeues the post for the worker instead of stranding it.
+ */
+export async function claimPost(
+  prisma: PrismaClient,
+  postId: string,
+  workerId: string,
+  options: {
+    now?: Date;
+    claimTimeoutMs?: number;
+    claimToken?: string;
+    data?: Pick<Prisma.PostUpdateManyMutationInput, "content" | "mediaUrls" | "platforms">;
+  } = {},
+): Promise<Post | null> {
+  const now = options.now ?? new Date();
+  const claimToken = options.claimToken ?? randomUUID();
+  const { count } = await prisma.post.updateMany({
+    where: { id: postId, status: { in: [...CLAIMABLE_NOW_STATUSES] } },
+    data: {
+      ...options.data,
+      status: "PUBLISHING",
+      scheduledFor: now,
+      claimedBy: workerId,
+      claimedAt: now,
+      claimExpiresAt: new Date(now.getTime() + (options.claimTimeoutMs ?? DEFAULT_CLAIM_TIMEOUT_MS)),
+      claimToken,
+      attemptCount: 1,
+      nextAttemptAt: null,
+    },
+  });
+  return count ? prisma.post.findFirst({ where: { id: postId, claimToken } }) : null;
+}
+
 const LEASE_EXPIRED = "Worker lease expired before the post was published";
 
 /**
@@ -148,13 +193,14 @@ export async function releaseStaleClaims(
  * Marks a claimed post's outcome after a publish attempt. The update is
  * conditional on the post still being PUBLISHING under the caller's claim
  * token, so a worker whose lease was reaped cannot overwrite the newer claim;
- * `null` is returned when the claim was lost.
+ * `null` is returned when the claim was lost. Publishing clears `lastError`;
+ * a FAILED outcome records `options.lastError` when given.
  */
 export async function completePost(
   prisma: PrismaClient,
   postId: string,
   status: "PUBLISHED" | "FAILED",
-  options: { claimToken?: string } = {},
+  options: { claimToken?: string; lastError?: string } = {},
 ): Promise<Post | null> {
   const where = { id: postId, status: "PUBLISHING" as const, ...(options.claimToken ? { claimToken: options.claimToken } : {}) };
   const { count } = await prisma.post.updateMany({
@@ -164,7 +210,7 @@ export async function completePost(
       claimExpiresAt: null,
       claimToken: null,
       nextAttemptAt: null,
-      ...(status === "PUBLISHED" ? { lastError: null } : {}),
+      ...(status === "PUBLISHED" ? { lastError: null } : options.lastError !== undefined ? { lastError: options.lastError } : {}),
     },
   });
   return count ? prisma.post.findUnique({ where: { id: postId } }) : null;

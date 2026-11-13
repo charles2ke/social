@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { MediaAttachment, PlatformId, PostDraft } from "@social/core";
+import { redactSecrets, type MediaAttachment, type PlatformId, type PostDraft } from "@social/core";
+import type { PlatformOutcome, PublishFn } from "./publishing.js";
 
 export type PostStatus = "draft" | "scheduled" | "publishing" | "published" | "failed" | "cancelled";
 
@@ -17,10 +18,24 @@ export type StoredPost = {
 
 export type PostInput = { text: string; media?: MediaAttachment[]; platforms?: PlatformId[]; scheduledFor?: Date };
 
+/** How a repository reaches the platforms when a stored post is published immediately. */
+export type PostPublisher = {
+  publish: PublishFn;
+  /** Resolves the connected account id recorded on each attempt. */
+  accountIdFor?: (platform: PlatformId) => Promise<string | undefined>;
+};
+
+export type PublishNowResult =
+  | { claimed: true; post: StoredPost; results: PlatformOutcome[] }
+  /** The post's status did not allow publishing; it is returned unchanged. */
+  | { claimed: false; post: StoredPost };
+
 export interface PostRepository {
+  /** Newest first. */
   list(status?: PostStatus): Promise<StoredPost[]>;
   get(id: string): Promise<StoredPost | undefined>;
   create(input: PostInput): Promise<StoredPost>;
+  /** Returns the post unchanged when its status no longer allows editing (see `isEditable`). */
   update(id: string, changes: Partial<PostInput>): Promise<StoredPost | undefined>;
   /**
    * Moves a draft (or an already scheduled post) into the worker's queue,
@@ -30,6 +45,14 @@ export interface PostRepository {
   schedule(id: string, scheduledFor: Date, changes?: Partial<PostInput>): Promise<StoredPost | undefined>;
   /** Returns the post unchanged when it is already claimed or terminal. */
   cancel(id: string): Promise<StoredPost | undefined>;
+  /**
+   * Publishes a draft, scheduled or failed post right away, applying `changes`
+   * in the same transition. Platforms that already succeeded are skipped, so
+   * retrying a partially failed post never double-posts. The post ends up
+   * `published`, or `failed` with `lastError` — it is not retried
+   * automatically, the caller decides whether to retry or reschedule.
+   */
+  publishNow(id: string, publisher: PostPublisher, changes?: Partial<PostInput>): Promise<PublishNowResult | undefined>;
 }
 
 /**
@@ -39,6 +62,9 @@ export interface PostRepository {
  */
 const schedulable = new Set<PostStatus>(["draft", "scheduled", "failed"]);
 const cancellable = new Set<PostStatus>(["draft", "scheduled", "failed"]);
+/** Editing is refused once the worker owns the post or it reached a terminal state. */
+const editable = new Set<PostStatus>(["draft", "scheduled", "failed"]);
+export const isEditable = (status: PostStatus) => editable.has(status);
 
 const draftOf = (post: StoredPost): PostDraft => ({ id: post.id, text: post.text, media: post.media });
 export { draftOf };
@@ -52,7 +78,8 @@ export function createMemoryPostRepository(): PostRepository {
   };
   return {
     async list(status) {
-      return [...posts.values()].filter((post) => !status || post.status === status);
+      // Map iteration follows insertion (creation) order.
+      return [...posts.values()].reverse().filter((post) => !status || post.status === status);
     },
     async get(id) {
       return posts.get(id);
@@ -71,6 +98,7 @@ export function createMemoryPostRepository(): PostRepository {
     async update(id, changes) {
       const post = posts.get(id);
       if (!post) return undefined;
+      if (!editable.has(post.status)) return post;
       return put({
         ...post,
         ...(changes.text !== undefined ? { text: changes.text } : {}),
@@ -98,6 +126,40 @@ export function createMemoryPostRepository(): PostRepository {
       if (!cancellable.has(post.status)) return post;
       return put({ ...post, status: "cancelled" });
     },
+    async publishNow(id, publisher, changes) {
+      const post = posts.get(id);
+      if (!post) return undefined;
+      if (!schedulable.has(post.status)) return { claimed: false, post };
+      // Claimed synchronously, before the first await, so a concurrent request sees "publishing" and is refused.
+      const claimed = put({
+        ...post,
+        ...(changes?.text !== undefined ? { text: changes.text } : {}),
+        ...(changes?.media !== undefined ? { media: changes.media } : {}),
+        ...(changes?.platforms !== undefined ? { platforms: changes.platforms } : {}),
+        status: "publishing",
+        scheduledFor: new Date().toISOString(),
+      });
+      const attempts = new Map((claimed.attempts ?? []).map((attempt) => [attempt.platform, attempt]));
+      const results: PlatformOutcome[] = [];
+      const errors = claimed.platforms.length ? [] : ["no target platforms — the post cannot be published"];
+      for (const platform of claimed.platforms) {
+        if (attempts.get(platform)?.status === "success") continue;
+        try {
+          const result = await publisher.publish(platform, draftOf(claimed));
+          attempts.set(platform, { platform, status: "success", externalPostId: result.platformPostId });
+          results.push({ platform, status: "published", platformPostId: result.platformPostId, ...(result.url ? { url: result.url } : {}) });
+        } catch (error) {
+          const message = redactSecrets(error instanceof Error ? error.message : "Publishing failed");
+          attempts.set(platform, { platform, status: "failed", error: message });
+          errors.push(`${platform}: ${message}`);
+          results.push({ platform, status: "failed", error: message });
+        }
+      }
+      const settled: StoredPost = { ...claimed, attempts: [...attempts.values()], status: errors.length ? "failed" : "published" };
+      if (errors.length) settled.lastError = errors.join("; ");
+      else delete settled.lastError;
+      return { claimed: true, post: put(settled), results };
+    },
   };
 }
 
@@ -118,9 +180,11 @@ const toStatusEnum = (value: PostStatus) => value.toUpperCase() as Uppercase<Pos
  * packages/db/src/scheduler.ts), so a post survives an API restart and is
  * visible to every replica.
  */
-export async function createPrismaPostRepository(): Promise<PostRepository> {
-  const { getPrismaClient }: PrismaModule = await import("@social/db");
-  const prisma = getPrismaClient();
+export async function createPrismaPostRepository(options: { prisma?: PrismaClient } = {}): Promise<PostRepository> {
+  const { DEFAULT_CLAIM_TIMEOUT_MS, claimPost, completePost, getPrismaClient }: PrismaModule = await import("@social/db");
+  // Loaded lazily like @social/db itself, so the in-memory mode never needs a generated Prisma client.
+  const { publishClaimedPost } = await import("./publishing.js");
+  const prisma = options.prisma ?? getPrismaClient();
 
   const toPost = (row: PostRow): StoredPost => ({
     id: row.id,
@@ -144,6 +208,11 @@ export async function createPrismaPostRepository(): Promise<PostRepository> {
   });
 
   const find = async (id: string) => prisma.post.findUnique({ where: { id }, include: { attempts: true } });
+  const contentChanges = (changes?: Partial<PostInput>) => ({
+    ...(changes?.text !== undefined ? { content: changes.text } : {}),
+    ...(changes?.media !== undefined ? { mediaUrls: changes.media as unknown as object } : {}),
+    ...(changes?.platforms !== undefined ? { platforms: changes.platforms.map(toPlatformEnum) } : {}),
+  });
 
   return {
     async list(status) {
@@ -172,31 +241,31 @@ export async function createPrismaPostRepository(): Promise<PostRepository> {
       return toPost(row);
     },
     async update(id, changes) {
-      if (!(await find(id))) return undefined;
-      const row = await prisma.post.update({
-        where: { id },
+      // Conditional on an editable status so a post the worker just claimed is
+      // never changed underneath its in-flight platform calls.
+      await prisma.post.updateMany({
+        where: { id, status: { in: [...editable].map(toStatusEnum) } },
         data: {
-          ...(changes.text !== undefined ? { content: changes.text } : {}),
-          ...(changes.media !== undefined ? { mediaUrls: changes.media as unknown as object } : {}),
-          ...(changes.platforms !== undefined ? { platforms: changes.platforms.map(toPlatformEnum) } : {}),
+          ...contentChanges(changes),
           ...(changes.scheduledFor !== undefined ? { scheduledFor: changes.scheduledFor } : {}),
         },
-        include: { attempts: true },
       });
-      return toPost(row);
+      const row = await find(id);
+      return row ? toPost(row) : undefined;
     },
     async schedule(id, scheduledFor, changes) {
       // Conditional on the current status so a published, cancelled or
       // in-flight post is never requeued by a racing request; the caller sees
       // the unchanged row and reports a conflict.
+      // Requeuing starts a fresh retry budget, so a failed post that exhausted
+      // its attempts gets the full set again rather than a single try.
       await prisma.post.updateMany({
         where: { id, status: { in: [...schedulable].map(toStatusEnum) } },
         data: {
-          ...(changes?.text !== undefined ? { content: changes.text } : {}),
-          ...(changes?.media !== undefined ? { mediaUrls: changes.media as unknown as object } : {}),
-          ...(changes?.platforms !== undefined ? { platforms: changes.platforms.map(toPlatformEnum) } : {}),
+          ...contentChanges(changes),
           status: "SCHEDULED",
           scheduledFor,
+          attemptCount: 0,
           nextAttemptAt: null,
           claimExpiresAt: null,
           claimToken: null,
@@ -215,6 +284,32 @@ export async function createPrismaPostRepository(): Promise<PostRepository> {
       });
       const row = await find(id);
       return row ? toPost(row) : undefined;
+    },
+    async publishNow(id, publisher, changes) {
+      // The claim is the same lease the worker uses, so the worker can neither
+      // pick the post up mid-publish nor lose it if this process dies.
+      const claimed = await claimPost(prisma, id, `api-${randomUUID()}`, { data: contentChanges(changes) });
+      if (!claimed) {
+        const row = await find(id);
+        return row ? { claimed: false, post: toPost(row) } : undefined;
+      }
+      const claimToken = claimed.claimToken ?? undefined;
+      const outcome = await publishClaimedPost({
+        prisma,
+        post: claimed,
+        publish: publisher.publish,
+        accountIdFor: publisher.accountIdFor,
+        claimTimeoutMs: DEFAULT_CLAIM_TIMEOUT_MS,
+      });
+      if (outcome.leaseHeld) {
+        const failed = outcome.errors.length > 0;
+        await completePost(prisma, id, failed ? "FAILED" : "PUBLISHED", {
+          ...(claimToken ? { claimToken } : {}),
+          ...(failed ? { lastError: outcome.errors.join("; ") } : {}),
+        });
+      }
+      const row = await find(id);
+      return row ? { claimed: true, post: toPost(row), results: outcome.results } : undefined;
     },
   };
 }

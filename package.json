@@ -13,6 +13,7 @@
     "typecheck": "pnpm -r --if-present run typecheck",
     "test": "pnpm -r --if-present run test",
     "build": "pnpm -r --if-present run build",
+    "e2e": "pnpm --filter @social/web run e2e",
     "dev": "pnpm --parallel --filter web --filter api dev",
     "db:generate": "pnpm --filter @social/db run generate",
     "db:migrate": "pnpm --filter @social/db run migrate",
