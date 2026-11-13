@@ -1,7 +1,7 @@
 import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { apiOrigin, docsScreenshots } from "./servers";
-import { stubMediaCdn, toLocalInputValue } from "./helpers";
+import { choosePlatforms, stubMediaCdn, toLocalInputValue } from "./helpers";
 
 /**
  * Regenerates the README screenshots in docs/screenshots:
@@ -12,6 +12,8 @@ import { stubMediaCdn, toLocalInputValue } from "./helpers";
 test.skip(!docsScreenshots, "set DOCS_SCREENSHOTS=1 to regenerate docs/screenshots");
 
 const docsDir = path.join(__dirname, "..", "..", "..", "docs", "screenshots");
+const linkedinText =
+  "We just launched Social: a self-hosted manager that drafts, schedules and publishes to every network from one dashboard.\n\nIt is open source, so you can run it on your own server.";
 
 async function capture(page: Page, name: string) {
   await page.evaluate(() => window.scrollTo(0, 0));
@@ -37,12 +39,18 @@ test("composing a scheduled post in light mode", async ({ page }) => {
   await page.getByLabel("Media URL").fill("https://cdn.example.com/launch.jpg");
   await page.getByLabel("Alt text").fill("The Social dashboard on a laptop");
   await page.getByRole("button", { name: "Add media" }).click();
-  await page.getByRole("button", { name: "Select all" }).click();
+  await choosePlatforms(page, ["Instagram", "Facebook", "LinkedIn"]);
+  // LinkedIn gets a longer, text-only version of the post.
+  const linkedin = page.getByRole("listitem", { name: "LinkedIn version" });
+  await linkedin.getByRole("button", { name: "Customize LinkedIn" }).click();
+  await linkedin.getByRole("checkbox", { name: "launch.jpg" }).uncheck();
+  await linkedin.getByLabel("LinkedIn text").fill(linkedinText);
   await page.getByLabel("Schedule for later").check();
   const publishAt = page.getByLabel("Publish at");
   await publishAt.fill(toLocalInputValue(new Date(Date.now() + 7 * 86_400_000)));
   await publishAt.blur();
   await expect(page.getByText("Queued in Postgres")).toBeVisible();
+  await expect(page.getByText("Within limits")).toHaveCount(3);
   await capture(page, "compose");
 });
 
@@ -53,15 +61,19 @@ test("posts list in light mode", async ({ page, request }) => {
     return (await response.json()) as { id: string; post?: { id: string } };
   };
   const ids = new Set<string>();
-  const draft = async (text: string, platforms: string[], media: object[] = []) => {
-    const created = await call("/drafts", { text, platforms, media });
+  const draft = async (text: string, platforms: string[], media: object[] = [], perPlatformOverrides?: object) => {
+    const created = await call("/drafts", { text, platforms, media, perPlatformOverrides });
     ids.add(created.id);
     return created.id;
   };
 
   const image = { url: "https://cdn.example.com/launch.jpg", kind: "image", altText: "The Social dashboard on a laptop" };
   // Created oldest first: the list shows the newest post at the top.
-  await call(`/posts/${await draft("Launch day! Our self-hosted social manager publishes everywhere at once.", ["linkedin", "facebook", "instagram"], [image])}/publish`);
+  await call(
+    `/posts/${await draft("Launch day! Our self-hosted social manager publishes everywhere at once.", ["linkedin", "facebook", "instagram"], [image], {
+      linkedin: { text: linkedinText, media: [] },
+    })}/publish`,
+  );
   // Instagram needs media, so this one publishes to LinkedIn and fails on Instagram.
   await call(`/posts/${await draft("Changelog: drafts, a publishing queue and one-click retries for failed platforms.", ["linkedin", "instagram"])}/publish`);
   const scheduled = await call("/schedule", {

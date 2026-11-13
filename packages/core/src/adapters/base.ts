@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { ConfigurationError, defaultFetch, type FetchLike, requestJson } from "../http.js";
 import { buildAuthorizeUrl, exchangeAuthorizationCode, type Env, type OAuthSpec, refreshAccessToken } from "../oauth.js";
 import { normalizeMedia, validateMedia } from "../media.js";
+import { draftFor } from "../drafts.js";
+import { validateText } from "../text.js";
 import {
   type Capabilities,
   type MediaAttachment,
@@ -13,6 +15,7 @@ import {
   type PostRef,
   type Profile,
   type PublishResult,
+  type TextLimit,
   type TokenSet,
   UnsupportedOperation,
 } from "../types.js";
@@ -36,6 +39,8 @@ export type PlatformSpec = {
   capabilities: Capabilities;
   /** Image/video limits the platform's publishing endpoint enforces. */
   mediaConstraints?: MediaConstraints;
+  /** Documented limits on the fields the post text fills; publishing is refused rather than truncated past them. */
+  textLimits?: TextLimit[];
   oauth?: OAuthSpec;
   getProfile?(ctx: AdapterContext): Promise<Profile>;
   publish?(ctx: AdapterContext, post: NormalizedDraft): Promise<PublishResult>;
@@ -66,6 +71,8 @@ export class ApiAdapter implements PlatformAdapter {
   readonly id: PlatformId;
   readonly capabilities: Capabilities;
   readonly mediaConstraints: MediaConstraints;
+  readonly textLimits: TextLimit[];
+  readonly publishUnsupported?: string;
 
   constructor(
     private readonly spec: PlatformSpec,
@@ -74,6 +81,8 @@ export class ApiAdapter implements PlatformAdapter {
     this.id = spec.id;
     this.capabilities = spec.capabilities;
     this.mediaConstraints = spec.mediaConstraints ?? noMedia;
+    this.textLimits = spec.textLimits ?? [];
+    this.publishUnsupported = spec.publishUnsupported;
   }
 
   private get env(): Env {
@@ -131,10 +140,11 @@ export class ApiAdapter implements PlatformAdapter {
 
   async publish(token: TokenSet, post: PostDraft): Promise<PublishResult> {
     if (this.spec.publishUnsupported) throw new UnsupportedOperation(this.id, "publishing", this.spec.publishUnsupported);
-    const draft = { ...post, ...(post.perPlatformOverrides?.[this.id] ?? {}) };
+    const draft = draftFor(this.id, post);
     const media = normalizeMedia(draft);
     if (!draft.text.trim() && !media.length) throw new Error("Post text is required");
     validateMedia(this.id, this.capabilities, this.mediaConstraints, media);
+    validateText(this.id, this.textLimits, draft.text);
     if (mockMode(this.env)) return { platformPostId: `${this.id}-${randomUUID()}`, publishedAt: new Date() };
     if (!this.spec.publish) throw new UnsupportedOperation(this.id, "publishing until its API client is configured");
     return this.spec.publish(this.context(token), { ...draft, media });

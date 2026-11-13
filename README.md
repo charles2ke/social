@@ -27,8 +27,8 @@ card per platform with its required environment variables and a connect link.
 ## Features
 
 - **Compose once, publish everywhere** — one draft fans out to Facebook,
-  Instagram, LinkedIn, WhatsApp, YouTube, TikTok and Strava, with per-platform
-  text overrides.
+  Instagram, LinkedIn, WhatsApp, YouTube, TikTok and Strava. Customize the text
+  or attachments for any one platform without touching the rest.
 - **Durable scheduling** — queued posts live in Postgres and are published by a
   separate worker with claim leases, retries with backoff, and cancellation.
   Schedule from the dashboard, the API, or an MCP client.
@@ -36,8 +36,10 @@ card per platform with its required environment variables and a connect link.
   every post with each platform's result. Edit, publish or cancel anything
   that hasn't gone out; retrying a partly failed post skips the platforms
   that already succeeded.
-- **Media validation up front** — attachments are checked against each
-  platform's constraints before anything is sent.
+- **Validation up front** — text and attachments are checked against each
+  platform's documented limits before anything is sent, and the composer shows
+  every platform's usage as you type. Text over a documented limit is
+  rejected rather than cut short.
 - **Encrypted credentials** — OAuth tokens are AES-256-GCM encrypted at rest,
   refreshed automatically, and redacted from logs and API responses.
 - **Mock mode** — a full end-to-end demo with no platform credentials.
@@ -54,6 +56,7 @@ card per platform with its required environment variables and a connect link.
 - [API reference](#api-reference)
 - [Database](#database)
 - [Images and videos](#images-and-videos)
+- [Per-platform versions and text limits](#per-platform-versions-and-text-limits)
 - [Scheduling](#scheduling)
 - [MCP](#mcp)
 - [Development](#development)
@@ -135,8 +138,8 @@ them, including per-platform OAuth credentials. The ones that matter most:
 
 Each platform is a `PlatformSpec` in
 [`packages/core/src/adapters`](packages/core/src/adapters) wrapped by
-`ApiAdapter`, which handles OAuth, mock mode, per-platform draft overrides,
-and token redaction. `fetch` and the environment are injected, so the API
+`ApiAdapter`, which handles OAuth, mock mode, per-platform versions, media
+and text validation, and token redaction. `fetch` and the environment are injected, so the API
 clients are unit-tested without network access.
 
 | Platform | Publishing | Media | Analytics | Notes |
@@ -199,17 +202,18 @@ your own authenticated proxy when `ADMIN_TOKEN` is set.
 | --- | --- |
 | `GET /health` | Liveness probe (public) |
 | `GET /ready` | Readiness, including database connectivity |
-| `GET /platforms` | Supported platforms, capabilities and media constraints |
+| `GET /platforms` | Supported platforms, capabilities, media constraints and text limits |
 | `GET /accounts` | Connected accounts (tokens are never returned) |
 | `GET /api/oauth/:platform/start` | Redirect to the platform's consent screen |
 | `GET /api/oauth/:platform/callback` | OAuth callback (authenticated by its signed `state`) |
-| `GET /drafts`, `POST /drafts` | List drafts; save `{ text, media, platforms? }` as a draft |
+| `GET /drafts`, `POST /drafts` | List drafts; save `{ text, media, platforms?, perPlatformOverrides? }` as a draft |
 | `POST /drafts/:id` | Edit a draft, scheduled or failed post in place; fields left out keep their values (409 with the post once it is publishing, published or cancelled) |
+| `POST /validate` | Check a draft's text and media against each platform's limits, with its [per-platform versions](#per-platform-versions-and-text-limits) applied |
 | `POST /media/validate` | Per-platform compatibility report for a draft's media |
 | `POST /publish` | Publish without saving a post; returns a per-platform `status` |
 | `POST /schedule` | Queue a post for the worker |
 | `GET /posts`, `GET /posts/:id` | List posts (newest first) and inspect one with its per-platform attempts |
-| `POST /posts/:id/publish` | Publish a saved post now, optionally applying `{ text, media, platforms }` first; returns `{ post, results }` |
+| `POST /posts/:id/publish` | Publish a saved post now, optionally applying `{ text, media, platforms, perPlatformOverrides }` first; returns `{ post, results }` |
 | `POST /posts/:id/cancel` | Cancel a draft, scheduled or failed post |
 | `GET /analytics/:platform/:postId` | Metrics for a published post |
 
@@ -286,9 +290,83 @@ capabilities, and `publish()` rejects incompatible media before contacting a
 platform — for example an image sent to TikTok, ten attachments on LinkedIn,
 or a YouTube post with no video. `GET /platforms` and the MCP
 `list_platforms` tool return those constraints, `POST /media/validate`
-reports per-platform compatibility for a draft (the dashboard uses it to warn
-while you compose), and `POST /publish` returns a per-platform
-`status: "published" | "failed"` instead of failing the whole request.
+reports per-platform compatibility for a draft, and `POST /publish` returns a
+per-platform `status: "published" | "failed"` instead of failing the whole
+request.
+
+## Per-platform versions and text limits
+
+Every platform publishes the post as written unless it has its own version.
+In the composer, **Customize** under *Per-platform versions* gives a platform
+its own text box and a choice of which attachments it publishes, and **Use
+main post** drops that version again. The **Posts** page marks a customized
+platform with a pencil.
+
+Through the API, versions travel in `perPlatformOverrides`, keyed by platform
+id. An override's `text` replaces the post's text for that platform, and its
+`media` (or `mediaUrls`) replaces the post's attachments. `"media": []` means
+no attachments there, and a field an override leaves out comes from the post:
+
+```json
+{
+  "text": "Launch day! Our self-hosted social manager publishes everywhere at once.",
+  "media": [{ "url": "https://cdn.example.com/launch.jpg", "kind": "image" }],
+  "platforms": ["instagram", "linkedin"],
+  "perPlatformOverrides": {
+    "linkedin": { "text": "We just launched Social, a self-hosted social manager.", "media": [] }
+  }
+}
+```
+
+`POST /drafts`, `POST /drafts/:id`, `POST /schedule`, `POST /publish`,
+`POST /posts/:id/publish` and `POST /validate` accept the field. Sending it
+replaces all of a post's overrides, `{}` or `null` clears them, and leaving it
+out keeps the saved ones. An unknown platform or field is a 400.
+
+Each adapter declares the `textLimits` its platform documents, and
+`GET /platforms` returns them. `publish()` checks the text after applying the
+platform's override and rejects anything over a limit with a
+`TextValidationError` (a 400 from the API) before contacting the platform —
+in mock mode too. `POST /validate` takes `{ text, media?, platforms?,
+perPlatformOverrides? }` and runs the same checks without publishing. For each
+platform (all of them unless `platforms` narrows it), it returns everything
+that would make publishing fail, plus how much of each limit the text uses;
+the composer calls it as you type:
+
+```json
+[
+  {
+    "platform": "youtube",
+    "ok": true,
+    "problems": [],
+    "text": [
+      { "field": "title", "part": "firstLine", "max": 100, "unit": "characters", "disallowed": ["<", ">"], "used": 10 },
+      { "field": "description", "part": "rest", "max": 5000, "unit": "bytes", "disallowed": ["<", ">"], "used": 21 }
+    ]
+  }
+]
+```
+
+| Platform | Field | Limit | Counted in | Source |
+| --- | --- | --- | --- | --- |
+| Instagram | Caption | 2,200 | characters | [IG User Media](https://developers.facebook.com/docs/instagram-platform/instagram-graph-api/reference/ig-user/media) |
+| LinkedIn | Share text | 3,000 | characters | [UGC Post API](https://learn.microsoft.com/en-us/linkedin/compliance/integrations/shares/ugc-post-api) |
+| WhatsApp | Message body | 4,096 | characters | [Cloud API messages](https://developers.facebook.com/docs/whatsapp/cloud-api/reference/messages) |
+| YouTube | Title (the first line) | 100, without `<` or `>` | characters | [Videos resource](https://developers.google.com/youtube/v3/docs/videos) |
+| YouTube | Description (everything after the first line) | 5,000, without `<` or `>` | UTF-8 bytes | [Videos resource](https://developers.google.com/youtube/v3/docs/videos) |
+| TikTok | Video caption | 2,200 | UTF-16 code units | [Direct Post reference](https://developers.tiktok.com/doc/content-posting-api-reference-direct-post) |
+
+Where a platform says "characters" without defining them, the limit counts
+Unicode code points, so 😀 is one character rather than the two that
+JavaScript's `length` reports. Facebook and Strava document no text limits,
+so none are enforced; Strava's activity name (the first line) is still cut to
+255 characters, as before. Instagram's caps of 30 hashtags and 20 @ mentions
+are not checked yet.
+
+*Within limits* in the composer means the post passes these checks and the
+media constraints above. It does not mean the account is connected, and
+LinkedIn still rejects attachments at publish time (see
+[Platform integrations](#platform-integrations)).
 
 ## Scheduling
 
@@ -303,7 +381,7 @@ says so.
 
 | Route | Purpose |
 | --- | --- |
-| `POST /schedule` | Queue `{ text, media, platforms, scheduledFor }`, or `{ id, platforms, scheduledFor }` for a saved draft, scheduled or failed post — text or media left out keep their saved values |
+| `POST /schedule` | Queue `{ text, media, platforms, scheduledFor, perPlatformOverrides? }`, or `{ id, platforms, scheduledFor }` for a saved draft, scheduled or failed post — text, media or overrides left out keep their saved values |
 | `GET /posts?status=scheduled` | List posts, optionally filtered by status |
 | `GET /posts/:id` | A post with its per-platform publish attempts and last error |
 | `POST /posts/:id/publish` | Publish a draft, scheduled or failed post now instead of waiting (409 once it is publishing, published or cancelled) |

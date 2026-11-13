@@ -32,6 +32,7 @@ async function sendWithConcurrency<T, R>(items: T[], limit: number, send: (item:
 export const whatsappSpec: PlatformSpec = {
   id: "whatsapp",
   capabilities: { text: true, image: false, video: false, schedule: true, analytics: false },
+  textLimits: [{ field: "message", part: "text", max: 4096, unit: "characters" }],
   oauth: metaOAuth(["whatsapp_business_messaging", "whatsapp_business_management"]),
   async getProfile(ctx) {
     const phoneNumberId = requireEnv(ctx, "WHATSAPP_PHONE_NUMBER_ID");

@@ -72,4 +72,16 @@ describe("Postgres post repository", () => {
   it("returns undefined for an unknown id", async () => {
     expect(await posts.publishNow("missing-post-id", { publish: vi.fn(published) })).toBeUndefined();
   });
+
+  it("stores per-platform overrides and publishes the ones a publish request sends", async () => {
+    const draft = await posts.create({ text: "hello", platforms: ["linkedin"], perPlatformOverrides: { linkedin: { text: "Hello, LinkedIn" } } });
+    expect(await posts.get(draft.id)).toMatchObject({ perPlatformOverrides: { linkedin: { text: "Hello, LinkedIn" } } });
+    expect(await posts.update(draft.id, { perPlatformOverrides: {} })).not.toHaveProperty("perPlatformOverrides");
+    const publish = vi.fn(published);
+
+    const result = await posts.publishNow(draft.id, { publish }, { perPlatformOverrides: { linkedin: { text: "Edited for LinkedIn" } } });
+
+    expect(publish.mock.calls[0][1].perPlatformOverrides).toEqual({ linkedin: { text: "Edited for LinkedIn" } });
+    expect(result?.post.perPlatformOverrides).toEqual({ linkedin: { text: "Edited for LinkedIn" } });
+  });
 });

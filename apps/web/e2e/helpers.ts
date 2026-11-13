@@ -21,9 +21,11 @@ export async function snap(page: Page, name: string) {
 /** Replaces the composer's platform selection (it starts with Instagram picked). */
 export async function choosePlatforms(page: Page, labels: string[]) {
   await page.getByRole("button", { name: "Clear", exact: true }).click();
+  // Scoped to the picker: per-platform versions below it repeat the platform names.
+  const picker = page.getByRole("group", { name: "Platforms" });
   for (const label of labels) {
-    await page.locator("label").filter({ hasText: label }).click();
-    await expect(page.getByRole("checkbox", { name: label })).toBeChecked();
+    await picker.locator("label").filter({ hasText: label }).click();
+    await expect(picker.getByRole("checkbox", { name: label })).toBeChecked();
   }
 }
 

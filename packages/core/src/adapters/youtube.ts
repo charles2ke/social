@@ -15,6 +15,11 @@ export const youtubeSpec: PlatformSpec = {
   capabilities: { text: true, image: false, video: true, schedule: true, analytics: true },
   // videos.insert uploads exactly one video; thumbnails are set separately.
   mediaConstraints: { maxAttachments: 1, allowsMixedKinds: false, requiresKind: "video" },
+  // The first line of the post is the title and the rest the description.
+  textLimits: [
+    { field: "title", part: "firstLine", max: 100, unit: "characters", disallowed: ["<", ">"] },
+    { field: "description", part: "rest", max: 5000, unit: "bytes", disallowed: ["<", ">"] },
+  ],
   oauth: {
     authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth",
     tokenUrl: "https://oauth2.googleapis.com/token",
@@ -42,7 +47,7 @@ export const youtubeSpec: PlatformSpec = {
       method: "POST",
       headers: { Authorization: authorization, "Content-Type": "application/json", "X-Upload-Content-Type": "video/*" },
       body: JSON.stringify({
-        snippet: { title: title.slice(0, 100), description: rest.join("\n") },
+        snippet: { title, description: rest.join("\n") },
         status: { privacyStatus: ctx.env.YOUTUBE_PRIVACY_STATUS ?? "private" },
       }),
     });

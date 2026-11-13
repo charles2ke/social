@@ -132,3 +132,80 @@ test("returns to a blank post when leaving an edit through the Composer link", a
   await expect(page.getByLabel("Post text")).toHaveValue("");
   await expect(page.getByRole("region", { name: "Editing a saved post" })).toHaveCount(0);
 });
+
+test("gives each platform its own version of the post, keeps it through a save and publishes it", async ({ page }) => {
+  const text = uniqueText("Product tour");
+  await page.goto("/");
+  await page.getByLabel("Post text").fill(text);
+  for (const url of ["https://cdn.example.com/tour.jpg", "https://cdn.example.com/tour.mp4"]) {
+    await page.getByLabel("Media URL").fill(url);
+    await page.getByRole("button", { name: "Add media" }).click();
+  }
+  await choosePlatforms(page, ["LinkedIn", "Instagram", "YouTube"]);
+
+  // Shared as is, the image and video together break LinkedIn and YouTube.
+  const versions = page.getByRole("list", { name: "Per-platform versions" });
+  const linkedin = versions.getByRole("listitem", { name: "LinkedIn version" });
+  const instagram = versions.getByRole("listitem", { name: "Instagram version" });
+  const youtube = versions.getByRole("listitem", { name: "YouTube version" });
+  await expect(linkedin).toContainText("linkedin cannot mix images and videos in one post");
+  await expect(youtube).toContainText("youtube does not support image attachments");
+  await expect(instagram).toContainText("Within limits");
+  await expect(page.getByRole("list", { name: "Text limits" })).toContainText(/Instagram caption \d+\/2200/);
+
+  await linkedin.getByRole("button", { name: "Customize LinkedIn" }).click();
+  const linkedinText = linkedin.getByLabel("LinkedIn text");
+  await expect(linkedinText).toHaveValue(text);
+  await linkedin.getByRole("checkbox", { name: "tour.mp4" }).uncheck();
+  await linkedinText.fill(`${text} — the full tour is on our blog`);
+  await expect(linkedin).toContainText("Within limits");
+
+  // YouTube's first line is the video title, which YouTube caps at 100 characters.
+  await youtube.getByRole("button", { name: "Customize YouTube" }).click();
+  await youtube.getByRole("checkbox", { name: "tour.jpg" }).uncheck();
+  const youtubeText = youtube.getByLabel("YouTube text");
+  await youtubeText.fill(`${"A very long video title ".repeat(5).trim()}\n${text}`);
+  await expect(youtube).toContainText("youtube allows at most 100 characters in the title (the first line), received 119");
+  await expect(youtube.getByRole("list", { name: "YouTube limits" }).getByRole("listitem").first()).toHaveText("title 119/100");
+  await snap(page, "composer-platform-problem");
+  await youtubeText.fill(`Product tour\n${text}`);
+  await expect(youtube).toContainText("Within limits");
+  await expect(page.getByRole("list", { name: "Text limits" })).not.toContainText("YouTube");
+
+  // Going back to the main post drops Instagram's version.
+  await instagram.getByRole("button", { name: "Customize Instagram" }).click();
+  await instagram.getByLabel("Instagram text").fill("Only for Instagram");
+  await instagram.getByRole("button", { name: "Use main post on Instagram" }).click();
+  await expect(instagram.getByLabel("Instagram text")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Save draft" }).click();
+  await expect(page.getByRole("status")).toContainText("Draft saved.");
+  await snap(page, "composer-platform-versions");
+
+  await page.getByRole("link", { name: "View in Posts" }).click();
+  const card = page.getByRole("article").filter({ hasText: text });
+  await expect(card.getByRole("listitem")).toHaveText(["LinkedIn (customized)", "Instagram", "YouTube (customized)"]);
+  await card.getByRole("link", { name: "Edit" }).click();
+
+  await expect(page.getByLabel("Post text")).toHaveValue(text);
+  await expect(linkedin.getByLabel("LinkedIn text")).toHaveValue(`${text} — the full tour is on our blog`);
+  await expect(linkedin.getByRole("checkbox", { name: "tour.jpg" })).toBeChecked();
+  await expect(linkedin.getByRole("checkbox", { name: "tour.mp4" })).not.toBeChecked();
+  await expect(youtube.getByLabel("YouTube text")).toHaveValue(`Product tour\n${text}`);
+  await expect(youtube.getByRole("checkbox", { name: "tour.jpg" })).not.toBeChecked();
+  await expect(instagram.getByRole("button", { name: "Customize Instagram" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Publish now" }).click();
+  const status = page.getByRole("status");
+  await expect(status).toContainText("Published.");
+  await expect(status.getByRole("listitem")).toHaveCount(3);
+
+  await page.goto("/posts");
+  const published = page.getByRole("article").filter({ hasText: text });
+  await expect(published.getByRole("listitem")).toHaveText([
+    "LinkedIn (customized) published",
+    "Instagram published",
+    "YouTube (customized) published",
+  ]);
+  await snap(page, "posts-platform-versions");
+});

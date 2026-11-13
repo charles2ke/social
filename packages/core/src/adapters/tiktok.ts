@@ -10,6 +10,8 @@ export const tiktokSpec: PlatformSpec = {
   id: "tiktok",
   capabilities: { text: true, image: false, video: true, schedule: true, analytics: true },
   mediaConstraints: { maxAttachments: 1, allowsMixedKinds: false, requiresKind: "video" },
+  // post_info.title is the video's caption, documented as at most 2200 UTF-16 runes.
+  textLimits: [{ field: "caption", part: "text", max: 2200, unit: "utf16" }],
   oauth: {
     authorizeUrl: "https://www.tiktok.com/v2/auth/authorize/",
     tokenUrl: `${API}/oauth/token/`,
@@ -35,7 +37,7 @@ export const tiktokSpec: PlatformSpec = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         post_info: {
-          title: post.text.slice(0, 2200),
+          title: post.text,
           privacy_level: ctx.env.TIKTOK_PRIVACY_LEVEL ?? "SELF_ONLY",
         },
         source_info: { source: "PULL_FROM_URL", video_url: video },

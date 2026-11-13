@@ -1,5 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { draftFor } from "@social/core";
 import { createPrismaClient } from "@social/db";
+import type { PublishFn } from "../src/publishing.js";
 import { runWorkerTick } from "../src/worker.js";
 import { testDatabaseUrl } from "../../../packages/db/test/setup.js";
 
@@ -47,6 +49,18 @@ describe("runWorkerTick", () => {
 
     expect(await runWorkerTick({ prisma, publish })).toMatchObject({ claimed: 0, published: 0 });
     expect(publish).not.toHaveBeenCalled();
+  });
+
+  it("publishes each platform's override of the post", async () => {
+    await scheduledPost({ platformOverrides: { linkedin: { text: "Shipped, LinkedIn edition" } } });
+    const publish = vi.fn<PublishFn>(published);
+
+    await runWorkerTick({ prisma, publish });
+
+    expect(publish.mock.calls.map(([platform, draft]) => [platform, draftFor(platform, draft).text])).toEqual([
+      ["linkedin", "Shipped, LinkedIn edition"],
+      ["facebook", "ship it"],
+    ]);
   });
 
   it("requeues the post and records the failure when a platform rejects it", async () => {

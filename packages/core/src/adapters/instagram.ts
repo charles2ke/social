@@ -10,6 +10,8 @@ export const instagramSpec: PlatformSpec = {
   capabilities: { text: true, image: true, video: true, schedule: true, analytics: true },
   // Carousels accept up to 10 images/videos, mixed kinds allowed, and every post needs media.
   mediaConstraints: { maxAttachments: 10, allowsMixedKinds: true, requiresMedia: true },
+  // The caption doc also caps hashtags (30) and @ tags (20); only the length is checked here.
+  textLimits: [{ field: "caption", part: "text", max: 2200, unit: "characters" }],
   oauth: metaOAuth(["instagram_basic", "instagram_content_publish", "instagram_manage_insights", "pages_show_list"]),
   async getProfile(ctx) {
     // The publishing endpoints are scoped to the Instagram user id linked to a Page,

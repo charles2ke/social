@@ -4,11 +4,15 @@ import type { MediaAttachment } from "./media";
 /** Mirrors `StoredPost` in apps/api/src/posts.ts. */
 export type PostStatus = "draft" | "scheduled" | "publishing" | "published" | "failed" | "cancelled";
 export type PostAttempt = { platform: string; status: string; externalPostId?: string; error?: string };
+/** Replaces the post's text or attachments on one platform; attachments given here replace the post's rather than adding to them. */
+export type PlatformOverride = { text?: string; media?: MediaAttachment[] };
 export type StoredPost = {
   id: string;
   text: string;
   media: MediaAttachment[];
   platforms: string[];
+  /** Keyed by platform; omitted when no platform is customized. */
+  perPlatformOverrides?: Record<string, PlatformOverride>;
   status: PostStatus;
   scheduledFor?: string;
   createdAt: string;

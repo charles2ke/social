@@ -1,4 +1,4 @@
-import { redactSecrets, type MediaAttachment, type PlatformId, type PostDraft, type PublishResult } from "@social/core";
+import { redactSecrets, type MediaAttachment, type PlatformId, type PlatformOverrides, type PostDraft, type PublishResult } from "@social/core";
 import { publishTargets, recordAttempt, renewClaim, type Post, type PrismaClient } from "@social/db";
 
 export type PublishFn = (platform: PlatformId, draft: PostDraft) => Promise<PublishResult>;
@@ -64,10 +64,14 @@ export async function publishClaimedPost(options: {
   const { prisma, post, claimTimeoutMs } = options;
   const claimToken = post.claimToken ?? undefined;
   const { pending, unconfirmed } = await publishTargets(prisma, post.id, post.platforms);
+  const overrides = post.platformOverrides;
   const draft: PostDraft = {
     id: post.id,
     text: post.content,
     media: Array.isArray(post.mediaUrls) ? (post.mediaUrls as unknown as MediaAttachment[]) : [],
+    ...(typeof overrides === "object" && overrides !== null && !Array.isArray(overrides)
+      ? { perPlatformOverrides: overrides as PlatformOverrides }
+      : {}),
   };
 
   const errors: string[] = [];
