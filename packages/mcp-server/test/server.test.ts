@@ -112,6 +112,19 @@ describe("MCP server", () => {
     }
   });
 
+  it("rejects an empty id when scheduling a saved post", async () => {
+    const api = fakeApi({});
+    const client = await connect(api.fetch);
+
+    const result = await client.callTool({
+      name: "schedule_saved_post",
+      arguments: { id: "", text: "Later", platforms: ["linkedin"], scheduledFor: "2030-01-31T09:00:00Z" },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(api.requests).toEqual([]);
+  });
+
   it("reports API errors as tool errors without echoing the admin token", async () => {
     const api = fakeApi({
       "POST /posts/p1/cancel": () => ({ status: 409, body: { error: `Post is already published (sent with Authorization: Bearer ${adminToken})` } }),

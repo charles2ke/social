@@ -198,7 +198,7 @@ export function createSocialMcpServer(options: SocialMcpServerOptions): McpServe
     {
       description:
         "Queue a saved draft or failed post for the scheduler worker to publish at scheduledFor, or move a scheduled post to a new time, applying any changes you pass first. A failed post gets a fresh set of attempts.",
-      inputSchema: { id: postId, ...changes, platforms: platforms.min(1), scheduledFor },
+      inputSchema: { id: postId.min(1), ...changes, platforms: platforms.min(1), scheduledFor },
       annotations: saves,
     },
     (post) => call(async () => json(await api.post("/schedule", post), ...(await storageWarnings()))),
