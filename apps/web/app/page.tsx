@@ -237,7 +237,7 @@ export default function Dashboard() {
 
   const saveDraft = async () => {
     if (busy) return;
-    if (!text.trim() && media.length === 0) { setStatus({ message: "Write something or attach media before saving", tone: "error" }); return; }
+    if (!hasContent) { setStatus({ message: "Write something or attach media before saving", tone: "error" }); return; }
     setBusy("saving"); setResults([]); setStatus({ message: "Saving…", tone: "info" });
     try {
       const content = { text, media, platforms: selected, perPlatformOverrides: versions };
@@ -344,7 +344,7 @@ export default function Dashboard() {
             value={text}
             onChange={(event) => setText(event.target.value)}
             placeholder="Share an update…"
-            required
+            required={!hasContent}
             className="field min-h-40 resize-y leading-relaxed"
           />
           {/* Customized platforms count their own text, under Publish to. */}

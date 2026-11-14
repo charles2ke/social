@@ -209,3 +209,18 @@ test("gives each platform its own version of the post, keeps it through a save a
   ]);
   await snap(page, "posts-platform-versions");
 });
+
+test("saves and publishes a customized platform version without main post content", async ({ page }) => {
+  const text = uniqueText("LinkedIn-only version");
+  await page.goto("/");
+  await choosePlatforms(page, ["LinkedIn"]);
+
+  const linkedin = page.getByRole("list", { name: "Per-platform versions" }).getByRole("listitem", { name: "LinkedIn version" });
+  await linkedin.getByRole("button", { name: "Customize LinkedIn" }).click();
+  await linkedin.getByLabel("LinkedIn text").fill(text);
+
+  await page.getByRole("button", { name: "Save draft" }).click();
+  await expect(page.getByRole("status")).toContainText("Draft saved.");
+  await page.getByRole("button", { name: "Publish now" }).click();
+  await expect(page.getByRole("status")).toContainText("Published.");
+});
