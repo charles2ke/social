@@ -2,11 +2,12 @@
 import Link from "next/link";
 import { useSelectedLayoutSegments } from "next/navigation";
 import { useState } from "react";
-import { HomeIcon, MenuIcon, SetupIcon } from "../icons";
+import { HomeIcon, ListIcon, MenuIcon, SetupIcon } from "../icons";
 import { ThemeToggle } from "./theme";
 
 const links = [
   { href: "/", segment: null, label: "Composer", description: "Write and publish", Icon: HomeIcon },
+  { href: "/posts", segment: "posts", label: "Posts", description: "Drafts, queue & history", Icon: ListIcon },
   { href: "/setup", segment: "setup", label: "Setup", description: "Connect platforms", Icon: SetupIcon },
 ];
 

@@ -16,7 +16,7 @@ import {
 } from "@social/core";
 import { createAccountRepository } from "./accounts.js";
 import { createState, verifyState } from "./oauth-state.js";
-import { createPostRepository, type PostStatus } from "./posts.js";
+import { createPostRepository, isEditable, type PostPublisher, type PostStatus } from "./posts.js";
 import { createPublisher } from "./publisher.js";
 
 const mockMode = process.env.MOCK_MODE === "true";
@@ -28,19 +28,27 @@ if (!adminToken && !mockMode) {
 const repository = await createAccountRepository();
 const posts = await createPostRepository();
 const publisher = createPublisher(repository, { mockMode });
+const postPublisher: PostPublisher = {
+  publish: publisher.publish,
+  accountIdFor: async (platform) => (await publisher.accountFor(platform))?.id,
+};
 const app = Fastify({ logger: false, bodyLimit: Number(process.env.API_BODY_LIMIT ?? 1_048_576) });
 const isPlatform = (value: string): value is PlatformId => (platformIds as readonly string[]).includes(value);
 
-type DraftBody = { text: string; mediaUrls?: string[]; media?: MediaAttachment[] };
+type DraftBody = { text: string; mediaUrls?: string[]; media?: MediaAttachment[]; platforms?: PlatformId[] };
 
 const postStatuses = ["draft", "scheduled", "publishing", "published", "failed", "cancelled"] as const;
 const isPostStatus = (value: string): value is PostStatus => (postStatuses as readonly string[]).includes(value);
 /** Accepts both the in-memory repository's UUIDs and Postgres' cuids. */
 const isPostId = (value: string) => /^[0-9a-z-]{8,64}$/i.test(value);
 
-/** Returns the error message for an invalid `platforms` array, or undefined when it is valid. */
-function validatePlatforms(platforms: unknown): string | undefined {
-  if (!Array.isArray(platforms) || !platforms.length) return "At least one platform is required";
+/**
+ * Returns the error message for an invalid `platforms` array, or undefined
+ * when it is valid. Drafts may be saved before any platform is picked.
+ */
+function validatePlatforms(platforms: unknown, options: { allowEmpty?: boolean } = {}): string | undefined {
+  if (!Array.isArray(platforms)) return options.allowEmpty ? "platforms must be an array" : "At least one platform is required";
+  if (!platforms.length && !options.allowEmpty) return "At least one platform is required";
   const unknown = platforms.filter((platform) => typeof platform !== "string" || !isPlatform(platform));
   if (unknown.length) return `Unknown platform(s): ${unknown.join(", ")}`;
   const duplicates = platforms.filter((platform, index) => platforms.indexOf(platform) !== index);
@@ -50,6 +58,25 @@ function validatePlatforms(platforms: unknown): string | undefined {
 /** Merge `media`/`mediaUrls` into typed attachments, returning the validation error instead of throwing. */
 function resolveMedia(body: Partial<DraftBody>): MediaAttachment[] | Error {
   try { return normalizeMedia(body); } catch (error) { return error instanceof MediaValidationError ? error : new Error("Invalid media"); }
+}
+
+/**
+ * Validates the optional content changes carried by an update or publish
+ * request. Media is only returned when the body has media fields, so a
+ * text-only change keeps the stored attachments.
+ */
+function resolveChanges(body: Partial<DraftBody>, options: { allowNoPlatforms: boolean }) {
+  const hasMedia = body.media !== undefined || body.mediaUrls !== undefined;
+  const media = hasMedia ? resolveMedia(body) : undefined;
+  if (media instanceof Error) return media;
+  if (body.text !== undefined && typeof body.text !== "string") return new Error("text must be a string");
+  const platformError = body.platforms === undefined ? undefined : validatePlatforms(body.platforms, { allowEmpty: options.allowNoPlatforms });
+  if (platformError) return new Error(platformError);
+  return {
+    ...(body.text !== undefined ? { text: body.text } : {}),
+    ...(media ? { media } : {}),
+    ...(body.platforms !== undefined ? { platforms: body.platforms } : {}),
+  };
 }
 
 /** OAuth callbacks are authenticated by their signed `state`, not by the admin token. */
@@ -134,19 +161,20 @@ app.post<{ Body: DraftBody }>("/drafts", async (request, reply) => {
   const media = resolveMedia(request.body);
   if (media instanceof Error) return reply.code(400).send({ error: media.message });
   if (typeof request.body?.text !== "string") return reply.code(400).send({ error: "text is required" });
-  return reply.code(201).type("application/json").send(await posts.create({ text: request.body.text, media }));
+  const { platforms } = request.body;
+  const platformError = platforms === undefined ? undefined : validatePlatforms(platforms, { allowEmpty: true });
+  if (platformError) return reply.code(400).send({ error: platformError });
+  return reply.code(201).type("application/json").send(await posts.create({ text: request.body.text, media, ...(platforms ? { platforms } : {}) }));
 });
-app.post<{ Params: { id: string }; Body: Partial<DraftBody> }>("/drafts/:id", async (request, reply) => {
+/** Updates a draft, scheduled or failed post in place; it keeps its status (409 once the post is publishing or done). */
+app.post<{ Params: { id: string }; Body: Partial<DraftBody> | undefined }>("/drafts/:id", async (request, reply) => {
   if (!isPostId(request.params.id)) return reply.code(400).send({ error: "Invalid draft id" });
-  // Only touch stored media when the update actually carries media fields, so a text-only update keeps existing attachments.
-  const hasMedia = request.body.media !== undefined || request.body.mediaUrls !== undefined;
-  const media = hasMedia ? resolveMedia(request.body) : undefined;
-  if (media instanceof Error) return reply.code(400).send({ error: media.message });
-  const draft = await posts.update(request.params.id, {
-    ...(request.body.text !== undefined ? { text: request.body.text } : {}),
-    ...(media ? { media } : {}),
-  });
-  return draft ? reply.type("application/json").send(draft) : reply.code(404).send({ error: "Draft not found" });
+  const changes = resolveChanges(request.body ?? {}, { allowNoPlatforms: true });
+  if (changes instanceof Error) return reply.code(400).send({ error: changes.message });
+  const draft = await posts.update(request.params.id, changes);
+  if (!draft) return reply.code(404).send({ error: "Draft not found" });
+  if (!isEditable(draft.status)) return reply.code(409).send({ error: `Post is already ${draft.status}`, post: draft });
+  return reply.type("application/json").send(draft);
 });
 
 /** Queues a post for the scheduler worker to publish at `scheduledFor`. */
@@ -156,19 +184,23 @@ app.post<{ Body: DraftBody & { platforms: PlatformId[]; scheduledFor: string; id
   if (platformError) return reply.code(400).send({ error: platformError });
   const when = new Date(scheduledFor ?? "");
   if (Number.isNaN(when.getTime())) return reply.code(400).send({ error: "scheduledFor must be an ISO 8601 date-time" });
-  const media = resolveMedia(request.body);
-  if (media instanceof Error) return reply.code(400).send({ error: media.message });
 
   if (id) {
     if (!isPostId(id)) return reply.code(400).send({ error: "Invalid post id" });
+    // Text or media left out of the body keep their stored values, so
+    // `{ id, platforms, scheduledFor }` queues a saved draft as it is.
+    const changes = resolveChanges(request.body, { allowNoPlatforms: false });
+    if (changes instanceof Error) return reply.code(400).send({ error: changes.message });
     // The content changes and the status transition are applied together, and
     // only from a status that may be queued — a published, cancelled or
     // already claimed post is reported as a conflict instead.
-    const scheduled = await posts.schedule(id, when, { media, platforms, ...(request.body.text !== undefined ? { text: request.body.text } : {}) });
+    const scheduled = await posts.schedule(id, when, changes);
     if (!scheduled) return reply.code(404).send({ error: "Post not found" });
     if (scheduled.status !== "scheduled") return reply.code(409).send({ error: `Post is already ${scheduled.status}`, post: scheduled });
     return reply.code(201).type("application/json").send(scheduled);
   }
+  const media = resolveMedia(request.body);
+  if (media instanceof Error) return reply.code(400).send({ error: media.message });
   if (typeof request.body.text !== "string") return reply.code(400).send({ error: "text is required" });
   return reply.code(201).type("application/json").send(await posts.create({ text: request.body.text, media, platforms, scheduledFor: when }));
 });
@@ -182,6 +214,26 @@ app.get<{ Params: { id: string } }>("/posts/:id", async (request, reply) => {
   if (!isPostId(request.params.id)) return reply.code(400).send({ error: "Invalid post id" });
   const post = await posts.get(request.params.id);
   return post ? reply.type("application/json").send(post) : reply.code(404).send({ error: "Post not found" });
+});
+/**
+ * Publishes a stored draft, scheduled or failed post right away, applying any
+ * `{ text, media, platforms }` in the body first. Platforms that already
+ * succeeded are skipped, which makes this the retry for a partially failed
+ * post. Responds with the settled post and this attempt's per-platform results.
+ */
+app.post<{ Params: { id: string }; Body: Partial<DraftBody> | undefined }>("/posts/:id/publish", async (request, reply) => {
+  if (!isPostId(request.params.id)) return reply.code(400).send({ error: "Invalid post id" });
+  const changes = resolveChanges(request.body ?? {}, { allowNoPlatforms: false });
+  if (changes instanceof Error) return reply.code(400).send({ error: changes.message });
+  const existing = await posts.get(request.params.id);
+  if (!existing) return reply.code(404).send({ error: "Post not found" });
+  if (isEditable(existing.status) && !(changes.platforms ?? existing.platforms).length) {
+    return reply.code(400).send({ error: "At least one platform is required" });
+  }
+  const published = await posts.publishNow(request.params.id, postPublisher, changes);
+  if (!published) return reply.code(404).send({ error: "Post not found" });
+  if (!published.claimed) return reply.code(409).send({ error: `Post is already ${published.post.status}`, post: published.post });
+  return reply.type("application/json").send({ post: published.post, results: published.results });
 });
 /** Cancelling is a no-op once the worker has claimed the post — its platform calls are already in flight. */
 app.post<{ Params: { id: string } }>("/posts/:id/cancel", async (request, reply) => {

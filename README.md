@@ -7,18 +7,22 @@ dashboard published automatically from `main` (see "Deploying the demo to
 GitHub Pages"). It is UI-only: there is no API or database behind it, so
 publishing does nothing.
 
-| Composer (dark) | Composing a post (light) | Setup |
-| --- | --- | --- |
-| ![Social composer in dark mode](docs/screenshots/dashboard.png) | ![Compose form with platforms selected in light mode](docs/screenshots/compose.png) | ![Setup page listing every platform](docs/screenshots/setup.png) |
+| Composer (dark) | Composing a post (light) |
+| --- | --- |
+| ![Social composer in dark mode](docs/screenshots/dashboard.png) | ![Compose form with platforms selected in light mode](docs/screenshots/compose.png) |
+| **Posts** | **Setup** |
+| ![Posts page with a draft, a scheduled, a failed and a published post](docs/screenshots/posts.png) | ![Setup page listing every platform](docs/screenshots/setup.png) |
 
-The dashboard has two pages — **Composer** (`/`) and **Setup** (`/setup`) —
-with light, dark and system themes selectable from the header. Composer
-writes the post, attaches media by URL (with previews and live per-platform
-compatibility warnings), picks the target platforms, and either publishes
-immediately or queues the post for a date and time you choose. Setup shows
-whether the API is reachable, the install commands, the OAuth callback URL to
-register, and a card per platform with its required environment variables and
-a connect link.
+The dashboard has three pages — **Composer** (`/`), **Posts** (`/posts`) and
+**Setup** (`/setup`) — with light, dark and system themes selectable from the
+header. Composer writes the post, attaches media by URL (with previews and
+live per-platform compatibility warnings), picks the target platforms, and
+publishes immediately, saves a draft, or queues the post for a date and time
+you choose. Posts lists drafts, the publishing queue and history with each
+platform's outcome: open a post in the composer to edit it, publish it now,
+retry the platforms that failed, or cancel it. Setup shows whether the API is
+reachable, the install commands, the OAuth callback URL to register, and a
+card per platform with its required environment variables and a connect link.
 
 ## Features
 
@@ -28,6 +32,10 @@ a connect link.
 - **Durable scheduling** — queued posts live in Postgres and are published by a
   separate worker with claim leases, retries with backoff, and cancellation.
   Schedule from the dashboard, the API, or an MCP client.
+- **Drafts, queue and history** — save drafts and come back to them, and see
+  every post with each platform's result. Edit, publish or cancel anything
+  that hasn't gone out; retrying a partly failed post skips the platforms
+  that already succeeded.
 - **Media validation up front** — attachments are checked against each
   platform's constraints before anything is sent.
 - **Encrypted credentials** — OAuth tokens are AES-256-GCM encrypted at rest,
@@ -86,7 +94,7 @@ A pnpm workspace monorepo:
 
 | Path | Contents |
 | --- | --- |
-| [`apps/web`](apps/web) | Next.js dashboard (Composer and Setup pages) |
+| [`apps/web`](apps/web) | Next.js dashboard (Composer, Posts and Setup pages) and its Playwright end-to-end tests |
 | [`apps/api`](apps/api) | Fastify API (`src/index.ts`) and scheduler worker (`src/worker.ts`) |
 | [`packages/core`](packages/core) | Platform adapters, OAuth, crypto, media rules, shared types |
 | [`packages/db`](packages/db) | Prisma schema, migrations, scheduler claim loop |
@@ -99,6 +107,7 @@ Workspace scripts (run from the root, prefixed with `corepack pnpm`):
 | --- | --- |
 | `dev` | Run the web app and API together |
 | `build`, `lint`, `typecheck`, `test` | Validate every workspace |
+| `e2e` | Build the dashboard and run its Playwright tests against a mock API (see "Development") |
 | `db:generate` | Generate the Prisma client (needed before `typecheck`) |
 | `db:migrate` | Apply migrations |
 | `db:studio` | Open Prisma Studio |
@@ -194,11 +203,14 @@ your own authenticated proxy when `ADMIN_TOKEN` is set.
 | `GET /accounts` | Connected accounts (tokens are never returned) |
 | `GET /api/oauth/:platform/start` | Redirect to the platform's consent screen |
 | `GET /api/oauth/:platform/callback` | OAuth callback (authenticated by its signed `state`) |
-| `GET /drafts`, `POST /drafts`, `POST /drafts/:id` | List, create and update drafts |
+| `GET /drafts`, `POST /drafts` | List drafts; save `{ text, media, platforms? }` as a draft |
+| `POST /drafts/:id` | Edit a draft, scheduled or failed post in place; fields left out keep their values (409 with the post once it is publishing, published or cancelled) |
 | `POST /media/validate` | Per-platform compatibility report for a draft's media |
-| `POST /publish` | Publish now; returns a per-platform `status` |
+| `POST /publish` | Publish without saving a post; returns a per-platform `status` |
 | `POST /schedule` | Queue a post for the worker |
-| `GET /posts`, `GET /posts/:id`, `POST /posts/:id/cancel` | Inspect and cancel queued posts |
+| `GET /posts`, `GET /posts/:id` | List posts (newest first) and inspect one with its per-platform attempts |
+| `POST /posts/:id/publish` | Publish a saved post now, optionally applying `{ text, media, platforms }` first; returns `{ post, results }` |
+| `POST /posts/:id/cancel` | Cancel a draft, scheduled or failed post |
 | `GET /analytics/:platform/:postId` | Metrics for a published post |
 
 ## Database
@@ -283,13 +295,18 @@ while you compose), and `POST /publish` returns a per-platform
 Scheduling is durable: `POST /schedule` writes the post to the `posts` table
 and a **separate scheduler worker process** publishes it. In the dashboard,
 tick **Schedule for later** in the composer and pick a date and time (entered
-in your local time zone and sent to the API as UTC).
+in your local time zone and sent to the API as UTC). The **Posts** page shows
+the queue: open a scheduled post in the composer to change it or its time,
+publish it straight away, or cancel it. Without `DATABASE_URL` the API keeps
+posts in memory, where nothing scheduled is ever published, and the dashboard
+says so.
 
 | Route | Purpose |
 | --- | --- |
-| `POST /schedule` | Queue `{ text, media, platforms, scheduledFor }` (or `{ id, platforms, scheduledFor }` for an existing draft) |
+| `POST /schedule` | Queue `{ text, media, platforms, scheduledFor }`, or `{ id, platforms, scheduledFor }` for a saved draft, scheduled or failed post — text or media left out keep their saved values |
 | `GET /posts?status=scheduled` | List posts, optionally filtered by status |
 | `GET /posts/:id` | A post with its per-platform publish attempts and last error |
+| `POST /posts/:id/publish` | Publish a draft, scheduled or failed post now instead of waiting (409 once it is publishing, published or cancelled) |
 | `POST /posts/:id/cancel` | Cancel a post that the worker has not claimed yet (409 once it is publishing or published) |
 
 Run the worker with `corepack pnpm --filter @social/api run start:worker`
@@ -306,6 +323,15 @@ Run the worker with `corepack pnpm --filter @social/api run start:worker`
    published post never re-posts where it already succeeded;
 4. marks the post `PUBLISHED`, or reschedules it with exponential backoff
    (`WORKER_POLL_INTERVAL_MS`, `WORKER_BATCH_SIZE`) until `max_attempts`.
+
+Publishing now — the dashboard's **Publish now** and **Retry** buttons, or
+`POST /posts/:id/publish` — takes the same claim lease as the worker, so the
+worker cannot pick the post up mid-publish, and if the API dies before
+finishing, the expired lease hands the post to the worker. It goes through
+the same per-platform loop, so a retry skips platforms that already
+succeeded, but it is not retried with backoff: if any platform fails, the
+post is marked `FAILED` straight away for you to fix and retry. Requeuing a
+failed post with `POST /schedule` gives it a fresh set of attempts.
 
 Errors stored on a post or an attempt are passed through `redactSecrets`, so
 tokens never reach the database or the API response.
@@ -332,6 +358,26 @@ The scheduler worker persists per-platform results (including errors), and
 its queue supports cancellation and bounded retries through the API (see
 "Scheduling"). `apps/api` tests cover the worker loop against a real
 Postgres, so `pnpm test` needs the `postgres` service running.
+
+### End-to-end tests
+
+`corepack pnpm e2e` builds the dashboard for production and drives it in
+Chromium with [Playwright](https://playwright.dev) against a mock-mode API
+that keeps posts in memory, on ports 3200 and 3201 (override them with
+`E2E_WEB_PORT` and `E2E_API_PORT`). The build replaces
+`apps/web/.next`, which `next dev` also uses, so stop `corepack pnpm dev`
+first. Install the browser once with
+`corepack pnpm --filter @social/web exec playwright install --with-deps chromium`.
+
+The tests save full-page screenshots of each step to
+`apps/web/test-results/screenshots`, and the HTML report goes to
+`apps/web/playwright-report`. CI runs the suite in the `e2e` job and uploads
+both as the `playwright-report` artifact.
+
+The screenshots at the top of this README come from the same suite:
+`DOCS_SCREENSHOTS=1 corepack pnpm e2e docs-screenshots` regenerates
+`docs/screenshots/*.png`. It starts its own servers on the default ports
+3000 and 3001, so the Setup page shows the usual URLs.
 
 ### Deploying the demo to GitHub Pages
 
@@ -360,6 +406,7 @@ self-host it for a working install.
 | --- | --- |
 | `typecheck` fails in `packages/db` with missing `@prisma/client` exports | Run `corepack pnpm db:generate` first |
 | `pnpm test` fails to connect to Postgres | Start it with `docker compose up -d postgres` — `apps/api` and `packages/db` tests use a real database |
+| `pnpm e2e` fails because the browser executable doesn't exist | Install it with `corepack pnpm --filter @social/web exec playwright install --with-deps chromium` |
 | API exits at startup complaining about `ADMIN_TOKEN` | Set `ADMIN_TOKEN`, or keep `MOCK_MODE=true` for the demo |
 | Scheduled posts stay `SCHEDULED` | The worker is not running (`corepack pnpm --filter @social/api run dev:worker`) or `DATABASE_URL` is unset, so posts only live in memory |
 | OAuth callback returns an error | The registered callback must match `BASE_URL/api/oauth/<platform>/callback` exactly, and `BASE_URL` must be reachable by the platform |

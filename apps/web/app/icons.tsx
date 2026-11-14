@@ -180,3 +180,38 @@ export const ClockIcon = (props: IconProps) => (
     <path d="M12 7.5V12l3 1.8" />
   </Icon>
 );
+
+export const ListIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M9 6.5h11M9 12h11M9 17.5h11" />
+    <path d="M4.5 6.5h.01M4.5 12h.01M4.5 17.5h.01" />
+  </Icon>
+);
+
+export const PencilIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M15.5 5.5 18.5 8.5" />
+    <path d="M5 19l1-4L16.2 4.8a2.1 2.1 0 0 1 3 3L9 18Z" />
+  </Icon>
+);
+
+export const SendIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M20.5 3.5 10 14" />
+    <path d="m20.5 3.5-6.5 17-4-6.5-6.5-4Z" />
+  </Icon>
+);
+
+export const RefreshIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M19.5 12a7.5 7.5 0 0 1-13 5.1" />
+    <path d="M4.5 12a7.5 7.5 0 0 1 13-5.1" />
+    <path d="M17.5 3.5v3.4h-3.4M6.5 20.5v-3.4h3.4" />
+  </Icon>
+);
+
+export const XIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="m6 6 12 12M18 6 6 18" />
+  </Icon>
+);

@@ -6,6 +6,7 @@ export {
   DEFAULT_RETRY_BACKOFF_MS,
   backoffDelayMs,
   claimDuePosts,
+  claimPost,
   completePost,
   failPost,
   pendingPlatforms,
