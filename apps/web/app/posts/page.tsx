@@ -38,7 +38,10 @@ const formatDate = (iso: string) => new Date(iso).toLocaleString(undefined, { da
 const labels = (platforms: string[]) => platforms.map((platform) => platformMeta(platform).label).join(", ");
 
 function timeline(post: StoredPost): string {
-  if (post.status === "scheduled" && post.scheduledFor) return `Publishes ${formatDate(post.scheduledFor)}`;
+  if (post.status === "scheduled" && post.scheduledFor) {
+    const when = post.nextAttemptAt && new Date(post.nextAttemptAt) > new Date(post.scheduledFor) ? post.nextAttemptAt : post.scheduledFor;
+    return `Publishes ${formatDate(when)}`;
+  }
   if (post.status === "publishing") return "Publishing now…";
   return `Created ${formatDate(post.createdAt)}`;
 }

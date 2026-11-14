@@ -11,6 +11,7 @@ export type StoredPost = {
   platforms: string[];
   status: PostStatus;
   scheduledFor?: string;
+  nextAttemptAt?: string;
   createdAt: string;
   lastError?: string;
   /** One entry per platform the post was sent to; `pending` means the outcome was never confirmed. */

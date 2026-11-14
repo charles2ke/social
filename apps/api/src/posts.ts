@@ -11,6 +11,7 @@ export type StoredPost = {
   platforms: PlatformId[];
   status: PostStatus;
   scheduledFor?: string;
+  nextAttemptAt?: string;
   createdAt: string;
   lastError?: string;
   attempts?: { platform: PlatformId; status: string; externalPostId?: string; error?: string }[];
@@ -193,6 +194,7 @@ export async function createPrismaPostRepository(options: { prisma?: PrismaClien
     platforms: row.platforms.map((platform) => toPlatformId(platform)),
     status: toStatus(row.status),
     scheduledFor: row.scheduledFor?.toISOString(),
+    nextAttemptAt: row.nextAttemptAt?.toISOString(),
     createdAt: row.createdAt.toISOString(),
     ...(row.lastError ? { lastError: row.lastError } : {}),
     ...(row.attempts?.length

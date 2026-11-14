@@ -1,6 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PlatformId } from "@social/core";
-import { createPrismaClient } from "@social/db";
+import { claimDuePosts, createPrismaClient, failPost } from "@social/db";
 import { createPrismaPostRepository } from "../src/posts.js";
 import { testDatabaseUrl } from "../../../packages/db/test/setup.js";
 
@@ -67,6 +67,20 @@ describe("Postgres post repository", () => {
 
     expect(scheduled?.status).toBe("scheduled");
     expect((await prisma.post.findUniqueOrThrow({ where: { id: row.id } })).attemptCount).toBe(0);
+  });
+
+  it("returns the worker's next retry time and clears it on rescheduling", async () => {
+    const now = new Date("2026-01-02T00:00:00.000Z");
+    const scheduledFor = new Date("2026-01-01T00:00:00.000Z");
+    const post = await posts.create({ text: "retry", platforms: ["linkedin"], scheduledFor });
+    const [claimed] = await claimDuePosts(prisma, "worker", { now });
+    await failPost(prisma, post.id, "temporary error", { now, claimToken: claimed.claimToken ?? undefined });
+    const nextAttemptAt = new Date(now.getTime() + 60_000).toISOString();
+
+    expect(await posts.get(post.id)).toMatchObject({ scheduledFor: scheduledFor.toISOString(), nextAttemptAt });
+    expect(await posts.list("scheduled")).toMatchObject([{ id: post.id, nextAttemptAt }]);
+    const rescheduled = await posts.schedule(post.id, new Date("2026-01-03T00:00:00.000Z"));
+    expect(rescheduled?.nextAttemptAt).toBeUndefined();
   });
 
   it("returns undefined for an unknown id", async () => {

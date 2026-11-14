@@ -134,6 +134,68 @@ test("returns to a blank post when leaving an edit through the Composer link", a
   await expect(page.getByRole("region", { name: "Editing a saved post" })).toHaveCount(0);
 });
 
+test("keeps actions disabled when an obsolete saved-post load finishes", async ({ page, request }) => {
+  const first = await (await request.post(`${apiOrigin}/drafts`, { data: { text: uniqueText("First"), platforms: ["linkedin"] } })).json();
+  const second = await (await request.post(`${apiOrigin}/drafts`, { data: { text: uniqueText("Second"), platforms: ["linkedin"] } })).json();
+  await page.goto("/");
+
+  let releaseFirst!: () => void;
+  let startFirst!: () => void;
+  let releaseSecond!: () => void;
+  let startSecond!: () => void;
+  const firstPending = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const firstStarted = new Promise<void>((resolve) => { startFirst = resolve; });
+  const secondPending = new Promise<void>((resolve) => { releaseSecond = resolve; });
+  const secondStarted = new Promise<void>((resolve) => { startSecond = resolve; });
+  await page.route(`${apiOrigin}/posts/${first.id}`, async (route) => {
+    const response = await route.fetch();
+    startFirst();
+    await firstPending;
+    await route.fulfill({ response });
+  });
+  await page.route(`${apiOrigin}/posts/${second.id}`, async (route) => {
+    const response = await route.fetch();
+    startSecond();
+    await secondPending;
+    await route.fulfill({ response });
+  });
+
+  await page.evaluate((id) => history.pushState(null, "", `/?post=${id}`), first.id);
+  await firstStarted;
+  await page.evaluate((id) => history.pushState(null, "", `/?post=${id}`), second.id);
+  await secondStarted;
+  const oldResponse = page.waitForResponse(`${apiOrigin}/posts/${first.id}`);
+  releaseFirst();
+  await oldResponse;
+  await page.waitForTimeout(100);
+  await expect(page.getByRole("button", { name: "Save draft" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Publish now" })).toBeDisabled();
+  await expect(page.getByRole("status")).toContainText("Loading the post");
+
+  releaseSecond();
+  await expect(page.getByLabel("Post text")).toHaveValue(second.text);
+  await expect(page.getByRole("button", { name: "Save draft" })).toBeEnabled();
+  await expect(page).toHaveURL(new RegExp(`\\?post=${second.id}$`));
+});
+
+test("shows the later of the scheduled and retry times for queued posts", async ({ page }) => {
+  const scheduledFor = "2026-01-01T10:00:00.000Z";
+  const laterRetry = "2026-01-02T10:00:00.000Z";
+  const earlierRetry = "2025-12-31T10:00:00.000Z";
+  const format = (iso: string) => new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  await page.route(`${apiOrigin}/posts`, (route) => route.fulfill({
+    json: [
+      { id: "retry", text: "Later retry", status: "scheduled", scheduledFor, nextAttemptAt: laterRetry, createdAt: scheduledFor, media: [], platforms: [] },
+      { id: "early", text: "Earlier retry", status: "scheduled", scheduledFor, nextAttemptAt: earlierRetry, createdAt: scheduledFor, media: [], platforms: [] },
+      { id: "normal", text: "No retry", status: "scheduled", scheduledFor, createdAt: scheduledFor, media: [], platforms: [] },
+    ],
+  }));
+  await page.goto("/posts");
+  await expect(page.getByRole("article").filter({ hasText: "Later retry" })).toContainText(`Publishes ${format(laterRetry)}`);
+  await expect(page.getByRole("article").filter({ hasText: "Earlier retry" })).toContainText(`Publishes ${format(scheduledFor)}`);
+  await expect(page.getByRole("article").filter({ hasText: "No retry" })).toContainText(`Publishes ${format(scheduledFor)}`);
+});
+
 for (const action of ["save", "save-error", "schedule", "publish"] as const) {
   test(`ignores a late ${action} response after leaving an edit`, async ({ page, request }) => {
     const original = uniqueText("Original post");
