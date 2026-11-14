@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { choosePlatforms, snap, stubMediaCdn, toLocalInputValue, uniqueText } from "./helpers";
+import { apiOrigin } from "./servers";
 
 test.beforeEach(async ({ page }) => {
   await stubMediaCdn(page);
@@ -223,4 +224,98 @@ test("saves and publishes a customized platform version without main post conten
   await expect(page.getByRole("status")).toContainText("Draft saved.");
   await page.getByRole("button", { name: "Publish now" }).click();
   await expect(page.getByRole("status")).toContainText("Published.");
+});
+
+for (const action of ["save", "save-error", "schedule", "publish"] as const) {
+  test(`ignores a late ${action} response after leaving an edit`, async ({ page, request }) => {
+    const original = uniqueText("Original post");
+    const created = await request.post(`${apiOrigin}/drafts`, { data: { text: original, platforms: ["linkedin"] } });
+    const { id } = (await created.json()) as { id: string };
+    await page.goto(`/?post=${id}`);
+    await expect(page.getByLabel("Post text")).toHaveValue(original);
+
+    let releaseOld!: () => void;
+    let oldStarted!: () => void;
+    const oldPending = new Promise<void>((resolve) => { releaseOld = resolve; });
+    const oldRequest = new Promise<void>((resolve) => { oldStarted = resolve; });
+    const endpoint = action.startsWith("save") ? `/drafts/${id}` : action === "schedule" ? "/schedule" : `/posts/${id}/publish`;
+    await page.route(`${apiOrigin}${endpoint}`, async (route) => {
+      const response = await route.fetch();
+      oldStarted();
+      await oldPending;
+      if (action === "save-error") {
+        await route.fulfill({ status: 409, json: { error: "Post is published", post: { id, status: "published" } } });
+      } else {
+        await route.fulfill({ response });
+      }
+    });
+
+    if (action === "schedule") {
+      await page.getByLabel("Schedule for later").check();
+      await page.getByLabel("Publish at").fill(toLocalInputValue(new Date(Date.now() + 86_400_000)));
+    }
+    await page.getByRole("button", { name: action.startsWith("save") ? "Save draft" : action === "schedule" ? "Schedule post" : "Publish now" }).click();
+    await oldRequest;
+    await page.getByRole("navigation", { name: "Primary" }).getByRole("link", { name: /Composer/ }).click();
+    await expect(page).not.toHaveURL(/\?post=/);
+
+    const fresh = uniqueText("New post");
+    await page.getByLabel("Post text").fill(fresh);
+    let releaseNew!: () => void;
+    let newStarted!: () => void;
+    const newPending = new Promise<void>((resolve) => { releaseNew = resolve; });
+    const newRequest = new Promise<void>((resolve) => { newStarted = resolve; });
+    await page.route(`${apiOrigin}/drafts`, async (route) => {
+      const response = await route.fetch();
+      newStarted();
+      await newPending;
+      await route.fulfill({ response });
+    });
+    await page.getByRole("button", { name: "Save draft" }).click();
+    await newRequest;
+
+    const oldResponse = page.waitForResponse((response) => response.url() === `${apiOrigin}${endpoint}` && response.request().method() === "POST");
+    releaseOld();
+    await oldResponse;
+    await page.waitForTimeout(100);
+    await expect(page).not.toHaveURL(/\?post=/);
+    await expect(page.getByLabel("Post text")).toHaveValue(fresh);
+    await expect(page.getByRole("button", { name: "Saving…" })).toBeDisabled();
+    await expect(page.getByRole("status")).toContainText("Saving…");
+
+    releaseNew();
+    await expect(page.getByRole("status")).toContainText("Draft saved.");
+    await expect(page).toHaveURL(/\?post=/);
+    const newId = new URL(page.url()).searchParams.get("post");
+    expect(newId).not.toBe(id);
+    expect(await (await request.get(`${apiOrigin}/posts/${newId}`)).json()).toMatchObject({ text: fresh });
+  });
+}
+
+test("does not publish an abandoned new post after draft creation", async ({ page }) => {
+  await page.goto("/");
+  await page.getByLabel("Post text").fill(uniqueText("Abandoned publish"));
+  await choosePlatforms(page, ["LinkedIn"]);
+  let release!: () => void;
+  let started!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const draftRequest = new Promise<void>((resolve) => { started = resolve; });
+  let publishRequests = 0;
+  await page.route(`${apiOrigin}/posts/*/publish`, async (route) => {
+    publishRequests += 1;
+    await route.continue();
+  });
+  await page.route(`${apiOrigin}/drafts`, async (route) => {
+    const response = await route.fetch();
+    started();
+    await pending;
+    await route.fulfill({ response });
+  });
+  await page.getByRole("button", { name: "Publish now" }).click();
+  await draftRequest;
+  await page.getByRole("navigation", { name: "Primary" }).getByRole("link", { name: /Posts/ }).click();
+  await expect(page).toHaveURL(/\/posts/);
+  release();
+  await page.waitForTimeout(100);
+  expect(publishRequests).toBe(0);
 });

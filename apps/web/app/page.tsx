@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { FormEvent, KeyboardEvent, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AlertIcon, CheckIcon, ClockIcon, LinkIcon, PlatformIcon, PlusIcon, TrashIcon } from "./icons";
 import { platformIds, platformMeta, publishablePlatformIds } from "./platforms";
 import { inferMediaKind, isHttpUrl, safeMediaSrc, type MediaAttachment } from "./media";
@@ -56,7 +56,7 @@ const changesPost = (override: PlatformOverride | undefined): override is Platfo
  */
 function PostParam({ onChange }: { onChange: (id: string | null) => void }) {
   const id = useSearchParams().get("post");
-  useEffect(() => {
+  useLayoutEffect(() => {
     onChange(id);
   }, [id, onChange]);
   return null;
@@ -69,6 +69,7 @@ export default function Dashboard() {
   const [post, setPost] = useState<{ id: string; status: PostStatus } | undefined>(undefined);
   // Tracks the post id synchronously, so the composer's own URL updates are not mistaken for navigation.
   const currentId = useRef<string | undefined>(undefined);
+  const session = useRef(0);
   const [text, setText] = useState("");
   const [selected, setSelected] = useState(defaultPlatforms);
   const [media, setMedia] = useState<MediaAttachment[]>([]);
@@ -92,6 +93,8 @@ export default function Dashboard() {
     return chosen;
   }, [chosenPlatforms, overrides]);
   const hasContent = Boolean(text.trim() || media.length || Object.values(versions).some((version) => version.text?.trim() || version.media?.length));
+
+  useLayoutEffect(() => () => { session.current += 1; currentId.current = undefined; }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -187,10 +190,11 @@ export default function Dashboard() {
   const load = useCallback(
     async (id: string) => {
       currentId.current = id;
+      const activeSession = session.current;
       setBusy("loading"); setResults([]); setStatus({ message: "Loading the post…", tone: "info" });
       try {
         const stored = await callApi<StoredPost>(`/posts/${encodeURIComponent(id)}`);
-        if (currentId.current !== id) return;
+        if (session.current !== activeSession) return;
         setText(stored.text); setMedia(stored.media); setOverrides(stored.perPlatformOverrides ?? {});
         setSelected(stored.platforms.filter((platform) => publishablePlatformIds.includes(platform)));
         const scheduled = stored.status === "scheduled" && stored.scheduledFor ? new Date(stored.scheduledFor) : undefined;
@@ -203,11 +207,11 @@ export default function Dashboard() {
         track(undefined);
         setStatus({ message: `That post is ${stored.status}, so it was copied into a new post.`, tone: "info" });
       } catch (error) {
-        if (currentId.current !== id) return;
+        if (session.current !== activeSession) return;
         track(undefined);
         setStatus({ message: error instanceof ApiError && error.status === 404 ? "That post no longer exists." : errorMessage(error), tone: "error" });
       } finally {
-        setBusy(undefined);
+        if (session.current === activeSession) setBusy(undefined);
       }
     },
     [track],
@@ -216,14 +220,15 @@ export default function Dashboard() {
   const onPostParam = useCallback(
     (id: string | null) => {
       if ((id ?? undefined) === currentId.current) return;
+      session.current += 1;
       if (id) { void load(id); return; }
       // Navigated back to a bare "/" (e.g. the Composer link) while editing: start a new post.
-      currentId.current = undefined; setPost(undefined); resetForm();
+      currentId.current = undefined; setPost(undefined); setBusy(undefined); resetForm();
     },
     [load, resetForm],
   );
 
-  const startNew = () => { track(undefined); resetForm(); };
+  const startNew = () => { session.current += 1; track(undefined); resetForm(); };
 
   const fail = (error: unknown) => {
     if (error instanceof ApiError && error.status === 409 && error.post && !isEditable(error.post.status)) {
@@ -238,16 +243,18 @@ export default function Dashboard() {
   const saveDraft = async () => {
     if (busy) return;
     if (!hasContent) { setStatus({ message: "Write something or attach media before saving", tone: "error" }); return; }
+    const activeSession = session.current;
     setBusy("saving"); setResults([]); setStatus({ message: "Saving…", tone: "info" });
     try {
       const content = { text, media, platforms: selected, perPlatformOverrides: versions };
       const saved = post
         ? await callApi<StoredPost>(`/drafts/${encodeURIComponent(post.id)}`, { body: content })
         : await callApi<StoredPost>("/drafts", { body: content });
+      if (session.current !== activeSession) return;
       track(saved);
       setStatus({ message: post ? "Changes saved." : "Draft saved.", tone: "success", postsLink: true });
-    } catch (error) { fail(error); }
-    finally { setBusy(undefined); }
+    } catch (error) { if (session.current === activeSession) fail(error); }
+    finally { if (session.current === activeSession) setBusy(undefined); }
   };
 
   const submit = async (event: FormEvent) => {
@@ -262,6 +269,7 @@ export default function Dashboard() {
       if (when.getTime() <= Date.now()) { setStatus({ message: "Pick a time in the future, or publish now", tone: "error" }); return; }
     }
 
+    const activeSession = session.current;
     setBusy(when ? "scheduling" : "publishing"); setResults([]); setStatus({ message: when ? "Scheduling…" : "Publishing…", tone: "info" });
     const content = { text, media, platforms: selected, perPlatformOverrides: versions };
     try {
@@ -269,6 +277,7 @@ export default function Dashboard() {
         const scheduled = await callApi<StoredPost>("/schedule", {
           body: { ...content, scheduledFor: when.toISOString(), ...(post ? { id: post.id } : {}) },
         });
+        if (session.current !== activeSession) return;
         track(scheduled);
         setStatus(
           storage === "memory"
@@ -281,10 +290,12 @@ export default function Dashboard() {
       let target = post;
       if (!target) {
         const created = await callApi<StoredPost>("/drafts", { body: content });
+        if (session.current !== activeSession) return;
         track(created);
         target = created;
       }
       const published = await callApi<PublishNowResponse>(`/posts/${encodeURIComponent(target.id)}/publish`, { body: content });
+      if (session.current !== activeSession) return;
       setResults(published.results);
       if (published.post.status === "published") {
         track(undefined);
@@ -297,8 +308,8 @@ export default function Dashboard() {
           postsLink: true,
         });
       }
-    } catch (error) { fail(error); }
-    finally { setBusy(undefined); }
+    } catch (error) { if (session.current === activeSession) fail(error); }
+    finally { if (session.current === activeSession) setBusy(undefined); }
   };
 
   const primaryLabel =
