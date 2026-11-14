@@ -50,6 +50,12 @@ function PlatformChip({ post, platform }: { post: StoredPost; platform: string }
     <li className="flex items-center gap-1.5 rounded-full border border-edge px-2.5 py-1 text-xs" title={attempt?.error}>
       <PlatformIcon platform={platform} width={14} height={14} style={{ color: meta.accent }} />
       <span className="font-medium">{meta.label}</span>
+      {post.perPlatformOverrides?.[platform] ? (
+        <span className="text-ink-muted" title={`${meta.label} gets its own text or attachments`}>
+          <PencilIcon width={12} height={12} />
+          <span className="sr-only"> (customized)</span>
+        </span>
+      ) : null}
       {attempt?.status === "success" ? (
         <span className="flex items-center gap-0.5 text-emerald-600 dark:text-emerald-400">
           <CheckIcon width={12} height={12} /> published

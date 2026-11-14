@@ -101,7 +101,7 @@ export async function claimPost(
     now?: Date;
     claimTimeoutMs?: number;
     claimToken?: string;
-    data?: Pick<Prisma.PostUpdateManyMutationInput, "content" | "mediaUrls" | "platforms">;
+    data?: Pick<Prisma.PostUpdateManyMutationInput, "content" | "mediaUrls" | "platformOverrides" | "platforms">;
   } = {},
 ): Promise<Post | null> {
   const now = options.now ?? new Date();

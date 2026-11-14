@@ -1,5 +1,21 @@
 import { describe, expect, it, beforeEach } from "vitest";
-import { adapters, decrypt, encrypt, inferMediaKind, MediaValidationError, normalizeMedia, publishDue } from "../src/index.js";
+import {
+  adapters,
+  countText,
+  decrypt,
+  draftFor,
+  encrypt,
+  inferMediaKind,
+  MediaValidationError,
+  normalizeMedia,
+  publishDue,
+  textPart,
+  textProblems,
+  TextValidationError,
+  validateText,
+  type PostDraft,
+  type TextLimit,
+} from "../src/index.js";
 beforeEach(() => { process.env.ENCRYPTION_KEY = "a".repeat(64); });
 describe("core", () => {
   it("encrypts tokens with authenticated encryption", () => expect(decrypt(encrypt("secret"))).toBe("secret"));
@@ -40,5 +56,47 @@ describe("media", () => {
   it("requires a video for YouTube", async () => {
     process.env.MOCK_MODE = "true";
     await expect(adapters.youtube.publish({ accessToken: "mock" }, { text: "Hi" })).rejects.toThrow(/requires/);
+  });
+});
+describe("text limits", () => {
+  it("counts characters, UTF-16 code units and bytes", () => {
+    expect(countText("hi 👋", "characters")).toBe(4);
+    expect(countText("hi 👋", "utf16")).toBe(5);
+    expect(countText("hi 👋", "bytes")).toBe(7);
+  });
+  it("splits the text into its first line and the rest", () => {
+    expect(textPart("Title\nBody\nMore", "firstLine")).toBe("Title");
+    expect(textPart("Title\nBody\nMore", "rest")).toBe("Body\nMore");
+    expect(textPart("Only a title", "firstLine")).toBe("Only a title");
+    expect(textPart("Only a title", "rest")).toBe("");
+  });
+  it("reports every limit the text breaks, in the platform's unit", () => {
+    const limits: TextLimit[] = [
+      { field: "title", part: "firstLine", max: 5, unit: "characters", disallowed: ["<", ">"] },
+      { field: "description", part: "rest", max: 4, unit: "bytes" },
+    ];
+    expect(textProblems("youtube", limits, "Short\néh!")).toEqual([]);
+    expect(textProblems("youtube", limits, "Too long <b>\né!!!")).toEqual([
+      "youtube allows at most 5 characters in the title (the first line), received 12",
+      'youtube does not allow "<" or ">" in the title (the first line)',
+      "youtube allows at most 4 bytes in the description (everything after the first line), received 5",
+    ]);
+    expect(() => validateText("youtube", limits, "Too long")).toThrow(TextValidationError);
+  });
+});
+describe("per-platform drafts", () => {
+  const image = (name: string) => ({ url: `https://cdn.example/${name}.png`, kind: "image" as const });
+  const post: PostDraft = {
+    text: "Main text",
+    media: [image("main")],
+    perPlatformOverrides: { linkedin: { text: "For LinkedIn" }, instagram: { mediaUrls: [image("square").url] }, facebook: { text: undefined } },
+  };
+  it("replaces only the fields an override sets", () => {
+    expect(draftFor("linkedin", post)).toMatchObject({ text: "For LinkedIn", media: [image("main")] });
+    expect(draftFor("facebook", post)).toMatchObject({ text: "Main text", media: [image("main")] });
+    expect(draftFor("youtube", post)).toBe(post);
+  });
+  it("replaces the post's attachments instead of adding to them", () => {
+    expect(normalizeMedia(draftFor("instagram", post))).toEqual([image("square")]);
   });
 });

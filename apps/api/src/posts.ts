@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { redactSecrets, type MediaAttachment, type PlatformId, type PostDraft } from "@social/core";
+import { redactSecrets, type MediaAttachment, type PlatformId, type PlatformOverrides, type PostDraft } from "@social/core";
 import type { PlatformOutcome, PublishFn } from "./publishing.js";
 
 export type PostStatus = "draft" | "scheduled" | "publishing" | "published" | "failed" | "cancelled";
@@ -9,6 +9,8 @@ export type StoredPost = {
   text: string;
   media: MediaAttachment[];
   platforms: PlatformId[];
+  /** Text or attachments that replace the post's on one platform; omitted when there are none. */
+  perPlatformOverrides?: PlatformOverrides;
   status: PostStatus;
   scheduledFor?: string;
   createdAt: string;
@@ -16,7 +18,14 @@ export type StoredPost = {
   attempts?: { platform: PlatformId; status: string; externalPostId?: string; error?: string }[];
 };
 
-export type PostInput = { text: string; media?: MediaAttachment[]; platforms?: PlatformId[]; scheduledFor?: Date };
+export type PostInput = {
+  text: string;
+  media?: MediaAttachment[];
+  platforms?: PlatformId[];
+  /** Replaces all of the post's overrides; `{}` removes them. */
+  perPlatformOverrides?: PlatformOverrides;
+  scheduledFor?: Date;
+};
 
 /** How a repository reaches the platforms when a stored post is published immediately. */
 export type PostPublisher = {
@@ -66,8 +75,29 @@ const cancellable = new Set<PostStatus>(["draft", "scheduled", "failed"]);
 const editable = new Set<PostStatus>(["draft", "scheduled", "failed"]);
 export const isEditable = (status: PostStatus) => editable.has(status);
 
-const draftOf = (post: StoredPost): PostDraft => ({ id: post.id, text: post.text, media: post.media });
+const draftOf = (post: StoredPost): PostDraft => ({
+  id: post.id,
+  text: post.text,
+  media: post.media,
+  ...(post.perPlatformOverrides ? { perPlatformOverrides: post.perPlatformOverrides } : {}),
+});
 export { draftOf };
+
+/** The post's overrides as a field, left out when there are none so both repositories serialize posts alike. */
+const overridesField = (overrides: PlatformOverrides | null | undefined) =>
+  overrides && Object.keys(overrides).length ? { perPlatformOverrides: overrides } : {};
+
+/** Applies the content fields `changes` sets; the rest keep their stored values. */
+function withChanges(post: StoredPost, changes: Partial<PostInput> = {}): StoredPost {
+  const { perPlatformOverrides, ...rest } = post;
+  return {
+    ...rest,
+    ...overridesField(changes.perPlatformOverrides ?? perPlatformOverrides),
+    ...(changes.text !== undefined ? { text: changes.text } : {}),
+    ...(changes.media !== undefined ? { media: changes.media } : {}),
+    ...(changes.platforms !== undefined ? { platforms: changes.platforms } : {}),
+  };
+}
 
 /** Used when no DATABASE_URL is configured (e.g. the mock-mode demo). */
 export function createMemoryPostRepository(): PostRepository {
@@ -90,6 +120,7 @@ export function createMemoryPostRepository(): PostRepository {
         text: input.text,
         media: input.media ?? [],
         platforms: input.platforms ?? [],
+        ...overridesField(input.perPlatformOverrides),
         status: input.scheduledFor ? "scheduled" : "draft",
         scheduledFor: input.scheduledFor?.toISOString(),
         createdAt: new Date().toISOString(),
@@ -100,10 +131,7 @@ export function createMemoryPostRepository(): PostRepository {
       if (!post) return undefined;
       if (!editable.has(post.status)) return post;
       return put({
-        ...post,
-        ...(changes.text !== undefined ? { text: changes.text } : {}),
-        ...(changes.media !== undefined ? { media: changes.media } : {}),
-        ...(changes.platforms !== undefined ? { platforms: changes.platforms } : {}),
+        ...withChanges(post, changes),
         ...(changes.scheduledFor !== undefined ? { scheduledFor: changes.scheduledFor.toISOString() } : {}),
       });
     },
@@ -111,14 +139,7 @@ export function createMemoryPostRepository(): PostRepository {
       const post = posts.get(id);
       if (!post) return undefined;
       if (!schedulable.has(post.status)) return post;
-      return put({
-        ...post,
-        ...(changes?.text !== undefined ? { text: changes.text } : {}),
-        ...(changes?.media !== undefined ? { media: changes.media } : {}),
-        ...(changes?.platforms !== undefined ? { platforms: changes.platforms } : {}),
-        status: "scheduled",
-        scheduledFor: scheduledFor.toISOString(),
-      });
+      return put({ ...withChanges(post, changes), status: "scheduled", scheduledFor: scheduledFor.toISOString() });
     },
     async cancel(id) {
       const post = posts.get(id);
@@ -131,14 +152,7 @@ export function createMemoryPostRepository(): PostRepository {
       if (!post) return undefined;
       if (!schedulable.has(post.status)) return { claimed: false, post };
       // Claimed synchronously, before the first await, so a concurrent request sees "publishing" and is refused.
-      const claimed = put({
-        ...post,
-        ...(changes?.text !== undefined ? { text: changes.text } : {}),
-        ...(changes?.media !== undefined ? { media: changes.media } : {}),
-        ...(changes?.platforms !== undefined ? { platforms: changes.platforms } : {}),
-        status: "publishing",
-        scheduledFor: new Date().toISOString(),
-      });
+      const claimed = put({ ...withChanges(post, changes), status: "publishing", scheduledFor: new Date().toISOString() });
       const attempts = new Map((claimed.attempts ?? []).map((attempt) => [attempt.platform, attempt]));
       const results: PlatformOutcome[] = [];
       const errors = claimed.platforms.length ? [] : ["no target platforms — the post cannot be published"];
@@ -173,6 +187,7 @@ const toPlatformEnum = (platform: PlatformId) => platform.toUpperCase() as Upper
 const toPlatformId = (value: string) => value.toLowerCase() as PlatformId;
 const toStatus = (value: string) => value.toLowerCase() as PostStatus;
 const toStatusEnum = (value: PostStatus) => value.toUpperCase() as Uppercase<PostStatus>;
+const isJsonObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
 /**
  * Postgres-backed posts. This is what makes scheduling durable: the scheduler
@@ -191,6 +206,7 @@ export async function createPrismaPostRepository(options: { prisma?: PrismaClien
     text: row.content,
     media: Array.isArray(row.mediaUrls) ? (row.mediaUrls as unknown as MediaAttachment[]) : [],
     platforms: row.platforms.map((platform) => toPlatformId(platform)),
+    ...overridesField(isJsonObject(row.platformOverrides) ? (row.platformOverrides as PlatformOverrides) : undefined),
     status: toStatus(row.status),
     scheduledFor: row.scheduledFor?.toISOString(),
     createdAt: row.createdAt.toISOString(),
@@ -212,6 +228,7 @@ export async function createPrismaPostRepository(options: { prisma?: PrismaClien
     ...(changes?.text !== undefined ? { content: changes.text } : {}),
     ...(changes?.media !== undefined ? { mediaUrls: changes.media as unknown as object } : {}),
     ...(changes?.platforms !== undefined ? { platforms: changes.platforms.map(toPlatformEnum) } : {}),
+    ...(changes?.perPlatformOverrides !== undefined ? { platformOverrides: changes.perPlatformOverrides as object } : {}),
   });
 
   return {
@@ -233,6 +250,7 @@ export async function createPrismaPostRepository(options: { prisma?: PrismaClien
           content: input.text,
           mediaUrls: (input.media ?? []) as unknown as object,
           platforms: (input.platforms ?? []).map(toPlatformEnum),
+          ...(input.perPlatformOverrides ? { platformOverrides: input.perPlatformOverrides as object } : {}),
           status: input.scheduledFor ? "SCHEDULED" : "DRAFT",
           scheduledFor: input.scheduledFor ?? null,
         },

@@ -5,14 +5,17 @@ import {
   ConfigurationError,
   MediaValidationError,
   PlatformApiError,
+  TextValidationError,
   UnsupportedOperation,
   adapters,
+  checkDraft,
   normalizeMedia,
   platformIds,
   redactSecrets,
   validateMedia,
   type MediaAttachment,
   type PlatformId,
+  type PlatformOverrides,
 } from "@social/core";
 import { createAccountRepository } from "./accounts.js";
 import { createState, verifyState } from "./oauth-state.js";
@@ -35,7 +38,7 @@ const postPublisher: PostPublisher = {
 const app = Fastify({ logger: false, bodyLimit: Number(process.env.API_BODY_LIMIT ?? 1_048_576) });
 const isPlatform = (value: string): value is PlatformId => (platformIds as readonly string[]).includes(value);
 
-type DraftBody = { text: string; mediaUrls?: string[]; media?: MediaAttachment[]; platforms?: PlatformId[] };
+type DraftBody = { text: string; mediaUrls?: string[]; media?: MediaAttachment[]; platforms?: PlatformId[]; perPlatformOverrides?: unknown };
 
 const postStatuses = ["draft", "scheduled", "publishing", "published", "failed", "cancelled"] as const;
 const isPostStatus = (value: string): value is PostStatus => (postStatuses as readonly string[]).includes(value);
@@ -60,10 +63,39 @@ function resolveMedia(body: Partial<DraftBody>): MediaAttachment[] | Error {
   try { return normalizeMedia(body); } catch (error) { return error instanceof MediaValidationError ? error : new Error("Invalid media"); }
 }
 
+const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+const overrideFields = new Set(["text", "media", "mediaUrls"]);
+
+/**
+ * Validates `perPlatformOverrides`, normalizing each override's attachments
+ * like the post's own. Overrides that set nothing are dropped, so `{}` (or
+ * `null`) clears them all. Returns undefined when the field is absent.
+ */
+function resolveOverrides(value: unknown): PlatformOverrides | Error | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return {};
+  if (!isObject(value)) return new Error("perPlatformOverrides must be an object keyed by platform");
+  const overrides: PlatformOverrides = {};
+  for (const [platform, override] of Object.entries(value)) {
+    if (!isPlatform(platform)) return new Error(`Unknown platform in perPlatformOverrides: ${platform}`);
+    if (!isObject(override)) return new Error(`perPlatformOverrides.${platform} must be an object`);
+    const unknownFields = Object.keys(override).filter((field) => !overrideFields.has(field));
+    if (unknownFields.length) return new Error(`perPlatformOverrides.${platform} has unknown field(s): ${unknownFields.join(", ")}`);
+    const { text, media, mediaUrls } = override;
+    if (text !== undefined && typeof text !== "string") return new Error(`perPlatformOverrides.${platform}.text must be a string`);
+    const replacesMedia = media !== undefined || mediaUrls !== undefined;
+    const attachments = replacesMedia ? resolveMedia({ media, mediaUrls } as Partial<DraftBody>) : undefined;
+    if (attachments instanceof Error) return attachments;
+    if (text === undefined && !attachments) continue;
+    overrides[platform] = { ...(text !== undefined ? { text } : {}), ...(attachments ? { media: attachments } : {}) };
+  }
+  return overrides;
+}
+
 /**
  * Validates the optional content changes carried by an update or publish
  * request. Media is only returned when the body has media fields, so a
- * text-only change keeps the stored attachments.
+ * text-only change keeps the stored attachments; overrides likewise.
  */
 function resolveChanges(body: Partial<DraftBody>, options: { allowNoPlatforms: boolean }) {
   const hasMedia = body.media !== undefined || body.mediaUrls !== undefined;
@@ -72,10 +104,13 @@ function resolveChanges(body: Partial<DraftBody>, options: { allowNoPlatforms: b
   if (body.text !== undefined && typeof body.text !== "string") return new Error("text must be a string");
   const platformError = body.platforms === undefined ? undefined : validatePlatforms(body.platforms, { allowEmpty: options.allowNoPlatforms });
   if (platformError) return new Error(platformError);
+  const overrides = resolveOverrides(body.perPlatformOverrides);
+  if (overrides instanceof Error) return overrides;
   return {
     ...(body.text !== undefined ? { text: body.text } : {}),
     ...(media ? { media } : {}),
     ...(body.platforms !== undefined ? { platforms: body.platforms } : {}),
+    ...(overrides ? { perPlatformOverrides: overrides } : {}),
   };
 }
 
@@ -134,7 +169,7 @@ app.addHook("onSend", async (_request, reply) => {
 });
 
 app.setErrorHandler((error: FastifyError, _request, reply) => {
-  if (error instanceof MediaValidationError) return reply.code(400).send({ error: error.message });
+  if (error instanceof MediaValidationError || error instanceof TextValidationError) return reply.code(400).send({ error: error.message });
   if (error instanceof UnsupportedOperation) return reply.code(501).send({ error: error.message });
   if (error instanceof ConfigurationError) return reply.code(400).send({ error: error.message });
   if (error instanceof PlatformApiError) return reply.code(502).send({ error: error.message });
@@ -154,7 +189,9 @@ app.get("/ready", async (_request, reply) => {
     return reply.code(503).send({ ok: false, database: "down" });
   }
 });
-app.get("/platforms", async () => Object.values(adapters).map(({ id, capabilities, mediaConstraints }) => ({ id, capabilities, mediaConstraints })));
+app.get("/platforms", async () =>
+  Object.values(adapters).map(({ id, capabilities, mediaConstraints, textLimits }) => ({ id, capabilities, mediaConstraints, textLimits })),
+);
 app.get("/accounts", async () => repository.list());
 app.get("/drafts", async () => posts.list("draft"));
 app.post<{ Body: DraftBody }>("/drafts", async (request, reply) => {
@@ -164,7 +201,12 @@ app.post<{ Body: DraftBody }>("/drafts", async (request, reply) => {
   const { platforms } = request.body;
   const platformError = platforms === undefined ? undefined : validatePlatforms(platforms, { allowEmpty: true });
   if (platformError) return reply.code(400).send({ error: platformError });
-  return reply.code(201).type("application/json").send(await posts.create({ text: request.body.text, media, ...(platforms ? { platforms } : {}) }));
+  const overrides = resolveOverrides(request.body.perPlatformOverrides);
+  if (overrides instanceof Error) return reply.code(400).send({ error: overrides.message });
+  return reply
+    .code(201)
+    .type("application/json")
+    .send(await posts.create({ text: request.body.text, media, ...(platforms ? { platforms } : {}), ...(overrides ? { perPlatformOverrides: overrides } : {}) }));
 });
 /** Updates a draft, scheduled or failed post in place; it keeps its status (409 once the post is publishing or done). */
 app.post<{ Params: { id: string }; Body: Partial<DraftBody> | undefined }>("/drafts/:id", async (request, reply) => {
@@ -187,8 +229,8 @@ app.post<{ Body: DraftBody & { platforms: PlatformId[]; scheduledFor: string; id
 
   if (id) {
     if (!isPostId(id)) return reply.code(400).send({ error: "Invalid post id" });
-    // Text or media left out of the body keep their stored values, so
-    // `{ id, platforms, scheduledFor }` queues a saved draft as it is.
+    // Text, media or overrides left out of the body keep their stored values,
+    // so `{ id, platforms, scheduledFor }` queues a saved draft as it is.
     const changes = resolveChanges(request.body, { allowNoPlatforms: false });
     if (changes instanceof Error) return reply.code(400).send({ error: changes.message });
     // The content changes and the status transition are applied together, and
@@ -202,7 +244,12 @@ app.post<{ Body: DraftBody & { platforms: PlatformId[]; scheduledFor: string; id
   const media = resolveMedia(request.body);
   if (media instanceof Error) return reply.code(400).send({ error: media.message });
   if (typeof request.body.text !== "string") return reply.code(400).send({ error: "text is required" });
-  return reply.code(201).type("application/json").send(await posts.create({ text: request.body.text, media, platforms, scheduledFor: when }));
+  const overrides = resolveOverrides(request.body.perPlatformOverrides);
+  if (overrides instanceof Error) return reply.code(400).send({ error: overrides.message });
+  return reply
+    .code(201)
+    .type("application/json")
+    .send(await posts.create({ text: request.body.text, media, platforms, scheduledFor: when, ...(overrides ? { perPlatformOverrides: overrides } : {}) }));
 });
 
 app.get<{ Querystring: { status?: string } }>("/posts", async (request, reply) => {
@@ -217,7 +264,7 @@ app.get<{ Params: { id: string } }>("/posts/:id", async (request, reply) => {
 });
 /**
  * Publishes a stored draft, scheduled or failed post right away, applying any
- * `{ text, media, platforms }` in the body first. Platforms that already
+ * `{ text, media, platforms, perPlatformOverrides }` in the body first. Platforms that already
  * succeeded are skipped, which makes this the retry for a partially failed
  * post. Responds with the settled post and this attempt's per-platform results.
  */
@@ -271,12 +318,14 @@ app.get<{ Params: { platform: string }; Querystring: { code?: string; state?: st
 );
 
 app.post<{ Body: DraftBody & { platforms: PlatformId[] } }>("/publish", async (request, reply) => {
-  const { platforms, ...body } = request.body;
+  const { platforms, perPlatformOverrides, ...body } = request.body;
   const platformError = validatePlatforms(platforms);
   if (platformError) return reply.code(400).send({ error: platformError });
   const media = resolveMedia(body);
   if (media instanceof Error) return reply.code(400).send({ error: media.message });
-  const draft = { ...body, media };
+  const overrides = resolveOverrides(perPlatformOverrides);
+  if (overrides instanceof Error) return reply.code(400).send({ error: overrides.message });
+  const draft = { ...body, media, ...(overrides ? { perPlatformOverrides: overrides } : {}) };
 
   return Promise.all(
     platforms.map(async (platform) => {
@@ -298,6 +347,20 @@ app.post<{ Body: DraftBody }>("/media/validate", async (request, reply) => {
     try { validateMedia(adapter.id, adapter.capabilities, adapter.mediaConstraints, media); return { platform: adapter.id, compatible: true }; }
     catch (error) { return { platform: adapter.id, compatible: false, reason: error instanceof Error ? error.message : "Incompatible media" }; }
   });
+});
+
+/**
+ * Checks a draft against each platform's text and media limits, with that
+ * platform's override applied, without publishing anything. Reports every
+ * platform unless `platforms` narrows it.
+ */
+app.post<{ Body: Partial<DraftBody> | undefined }>("/validate", async (request, reply) => {
+  const body = request.body ?? {};
+  const content = resolveChanges(body, { allowNoPlatforms: true });
+  if (content instanceof Error) return reply.code(400).send({ error: content.message });
+  if (typeof body.text !== "string") return reply.code(400).send({ error: "text is required" });
+  const draft = { text: body.text, media: content.media ?? [], ...(content.perPlatformOverrides ? { perPlatformOverrides: content.perPlatformOverrides } : {}) };
+  return (content.platforms ?? platformIds).map((platform) => checkDraft(adapters[platform], draft));
 });
 
 app.get<{ Params: { platform: string; postId: string } }>("/analytics/:platform/:postId", async (request, reply) => {

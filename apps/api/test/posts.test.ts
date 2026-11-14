@@ -71,6 +71,16 @@ describe("post repository", () => {
 
     expect(await posts.update(draft.id, { text: "changed" })).toMatchObject({ text: "hello", status: "published" });
   });
+
+  it("keeps per-platform overrides until an update replaces or clears them", async () => {
+    const posts = createMemoryPostRepository();
+    const draft = await posts.create({ text: "hello", perPlatformOverrides: { linkedin: { text: "Hello, LinkedIn" } } });
+    expect(draft.perPlatformOverrides).toEqual({ linkedin: { text: "Hello, LinkedIn" } });
+
+    expect((await posts.update(draft.id, { text: "changed" }))?.perPlatformOverrides).toEqual({ linkedin: { text: "Hello, LinkedIn" } });
+    expect((await posts.update(draft.id, { perPlatformOverrides: { facebook: { media } } }))?.perPlatformOverrides).toEqual({ facebook: { media } });
+    expect(await posts.update(draft.id, { perPlatformOverrides: {} })).not.toHaveProperty("perPlatformOverrides");
+  });
 });
 
 describe("publishing a stored post now", () => {

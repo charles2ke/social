@@ -1,8 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { FormEvent, KeyboardEvent, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { apiUrl } from "./config";
+import { FormEvent, KeyboardEvent, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertIcon, CheckIcon, ClockIcon, LinkIcon, PlatformIcon, PlusIcon, TrashIcon } from "./icons";
 import { platformIds, platformMeta, publishablePlatformIds } from "./platforms";
 import { inferMediaKind, isHttpUrl, safeMediaSrc, type MediaAttachment } from "./media";
@@ -11,20 +10,28 @@ import {
   callApi,
   errorMessage,
   isEditable,
+  type PlatformOverride,
   type PostStatus,
   type PublishNowResponse,
   type PublishResult,
   type StoredPost,
 } from "./posts";
 import { StatusBadge } from "./components/post-status";
+import { LimitChips, PlatformVersion } from "./components/platform-version";
 import { StorageNotice, useStorageMode } from "./components/storage-notice";
+import { limitChips, type TextLimit } from "./text";
 
-type Compatibility = { platform: string; compatible: boolean; reason?: string };
+/** One platform's answer from `POST /validate`. */
+type DraftCheck = { platform: string; problems: string[] };
+/** Per-platform versions of the post, keyed by platform. An entry that sets nothing is customized but still matches the post. */
+type Overrides = Record<string, PlatformOverride>;
 /** `postsLink` appends a link to the Posts page, where the saved post can be found. */
 type Status = { message: string; tone: "info" | "warning" | "error" | "success"; postsLink?: boolean };
 type Action = "loading" | "saving" | "publishing" | "scheduling";
 
 const defaultPlatforms = ["instagram"];
+/** Waits for a pause in typing before asking the API to check the draft. */
+const validateDelayMs = 400;
 
 const editingHints: Partial<Record<PostStatus, string>> = {
   draft: "Editing a saved draft.",
@@ -37,6 +44,10 @@ function toLocalInputValue(date: Date): string {
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
   return local.toISOString().slice(0, 16);
 }
+
+/** True when a platform's version changes something; a customized platform that changes nothing publishes the post as is. */
+const changesPost = (override: PlatformOverride | undefined): override is PlatformOverride =>
+  Boolean(override && (override.text !== undefined || override.media !== undefined));
 
 /**
  * Reports the `?post=<id>` the composer should open. `useSearchParams` opts
@@ -63,29 +74,82 @@ export default function Dashboard() {
   const [media, setMedia] = useState<MediaAttachment[]>([]);
   const [mediaUrl, setMediaUrl] = useState("");
   const [altText, setAltText] = useState("");
-  const [warnings, setWarnings] = useState<Compatibility[]>([]);
+  const [overrides, setOverrides] = useState<Overrides>({});
+  const [textLimits, setTextLimits] = useState<Record<string, TextLimit[]>>({});
+  /** Problems per platform from the last `/validate`; undefined while there is nothing to check. */
+  const [problems, setProblems] = useState<Record<string, string[]> | undefined>(undefined);
   const [results, setResults] = useState<PublishResult[]>([]);
   const [status, setStatus] = useState<Status | undefined>(undefined);
   const [later, setLater] = useState(false);
   const [scheduledFor, setScheduledFor] = useState("");
   const [busy, setBusy] = useState<Action | undefined>(undefined);
 
+  const chosenPlatforms = useMemo(() => platformIds.filter((platform) => selected.includes(platform)), [selected]);
+  /** The per-platform versions saving or publishing sends: those of the chosen platforms that change something. */
+  const versions = useMemo(() => {
+    const chosen: Overrides = {};
+    for (const platform of chosenPlatforms) if (changesPost(overrides[platform])) chosen[platform] = overrides[platform];
+    return chosen;
+  }, [chosenPlatforms, overrides]);
+  const hasContent = Boolean(text.trim() || media.length || Object.values(versions).some((version) => version.text?.trim() || version.media?.length));
+
   useEffect(() => {
     const controller = new AbortController();
-    fetch(`${apiUrl}/media/validate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: "", media }),
-      signal: controller.signal,
-    })
-      .then((response) => (response.ok ? response.json() : []))
-      // Warn only about the platforms the user actually publishes to; an empty list can still be incompatible (e.g. media-required platforms).
-      .then((result: Compatibility[]) =>
-        setWarnings(Array.isArray(result) ? result.filter((item) => !item.compatible && selected.includes(item.platform)) : []),
-      )
-      .catch(() => setWarnings([]));
+    callApi<{ id: string; textLimits?: TextLimit[] }[]>("/platforms", { signal: controller.signal })
+      .then((list) => setTextLimits(Object.fromEntries(list.map((platform) => [platform.id, platform.textLimits ?? []]))))
+      // Without the limits the composer only loses its counters; the API still checks every draft.
+      .catch(() => undefined);
     return () => controller.abort();
-  }, [media, selected]);
+  }, []);
+
+  // Asks the API what would fail on each chosen platform, once typing pauses; nothing is flagged before there is content.
+  useEffect(() => {
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => {
+        if (!hasContent || chosenPlatforms.length === 0) { setProblems(undefined); return; }
+        callApi<DraftCheck[]>("/validate", {
+          body: { text, media, platforms: chosenPlatforms, perPlatformOverrides: versions },
+          signal: controller.signal,
+        })
+          .then((checks) => setProblems(Object.fromEntries(checks.map((check) => [check.platform, check.problems]))))
+          .catch(() => { if (!controller.signal.aborted) setProblems(undefined); });
+      },
+      hasContent ? validateDelayMs : 0,
+    );
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [hasContent, text, media, chosenPlatforms, versions]);
+
+  const updateOverride = (platform: string, update: (override: PlatformOverride) => PlatformOverride | undefined) =>
+    setOverrides((current) => {
+      const { [platform]: existing, ...others } = current;
+      const next = update(existing ?? {});
+      return next ? { ...others, [platform]: next } : others;
+    });
+
+  /** Picks which of the attachments a customized platform publishes; picking all of the post's, in order, follows the post again. */
+  const toggleMedia = (platform: string, url: string) =>
+    updateOverride(platform, (override) => {
+      const options = [...media, ...(override.media ?? []).filter((item) => !media.some((main) => main.url === item.url))];
+      const chosen = new Set((override.media ?? media).map((item) => item.url));
+      if (chosen.has(url)) chosen.delete(url); else chosen.add(url);
+      const next = options.filter((item) => chosen.has(item.url));
+      const followsPost = next.length === media.length && next.every((item, index) => item.url === media[index].url);
+      return { ...(override.text !== undefined ? { text: override.text } : {}), ...(followsPost ? {} : { media: next }) };
+    });
+
+  const removeMedia = (url: string) => {
+    setMedia((items) => items.filter((existing) => existing.url !== url));
+    // A removed attachment is gone from every platform's version too.
+    setOverrides((current) =>
+      Object.fromEntries(
+        Object.entries(current).map(([platform, override]) => [
+          platform,
+          override.media ? { ...override, media: override.media.filter((item) => item.url !== url) } : override,
+        ]),
+      ),
+    );
+  };
 
   const addMedia = () => {
     const url = mediaUrl.trim();
@@ -116,7 +180,7 @@ export default function Dashboard() {
   );
 
   const resetForm = useCallback(() => {
-    setText(""); setMedia([]); setMediaUrl(""); setAltText(""); setSelected(defaultPlatforms);
+    setText(""); setMedia([]); setMediaUrl(""); setAltText(""); setOverrides({}); setSelected(defaultPlatforms);
     setLater(false); setScheduledFor(""); setResults([]); setStatus(undefined);
   }, []);
 
@@ -127,7 +191,7 @@ export default function Dashboard() {
       try {
         const stored = await callApi<StoredPost>(`/posts/${encodeURIComponent(id)}`);
         if (currentId.current !== id) return;
-        setText(stored.text); setMedia(stored.media);
+        setText(stored.text); setMedia(stored.media); setOverrides(stored.perPlatformOverrides ?? {});
         setSelected(stored.platforms.filter((platform) => publishablePlatformIds.includes(platform)));
         const scheduled = stored.status === "scheduled" && stored.scheduledFor ? new Date(stored.scheduledFor) : undefined;
         setLater(Boolean(scheduled)); setScheduledFor(scheduled ? toLocalInputValue(scheduled) : "");
@@ -173,10 +237,10 @@ export default function Dashboard() {
 
   const saveDraft = async () => {
     if (busy) return;
-    if (!text.trim() && media.length === 0) { setStatus({ message: "Write something or attach media before saving", tone: "error" }); return; }
+    if (!hasContent) { setStatus({ message: "Write something or attach media before saving", tone: "error" }); return; }
     setBusy("saving"); setResults([]); setStatus({ message: "Saving…", tone: "info" });
     try {
-      const content = { text, media, platforms: selected };
+      const content = { text, media, platforms: selected, perPlatformOverrides: versions };
       const saved = post
         ? await callApi<StoredPost>(`/drafts/${encodeURIComponent(post.id)}`, { body: content })
         : await callApi<StoredPost>("/drafts", { body: content });
@@ -199,7 +263,7 @@ export default function Dashboard() {
     }
 
     setBusy(when ? "scheduling" : "publishing"); setResults([]); setStatus({ message: when ? "Scheduling…" : "Publishing…", tone: "info" });
-    const content = { text, media, platforms: selected };
+    const content = { text, media, platforms: selected, perPlatformOverrides: versions };
     try {
       if (when) {
         const scheduled = await callApi<StoredPost>("/schedule", {
@@ -274,25 +338,30 @@ export default function Dashboard() {
 
       <form onSubmit={submit} className="space-y-6">
         <section className="card space-y-3">
-          <div className="flex items-baseline justify-between">
-            <h2 className="text-lg font-semibold">Post</h2>
-            <span className={`text-xs ${text.length > 2900 ? "text-amber-500" : "text-ink-muted"}`}>{text.length}/3000</span>
-          </div>
+          <h2 className="text-lg font-semibold">Post</h2>
           <textarea
             aria-label="Post text"
             value={text}
             onChange={(event) => setText(event.target.value)}
-            maxLength={3000}
             placeholder="Share an update…"
-            required
+            required={!hasContent}
             className="field min-h-40 resize-y leading-relaxed"
+          />
+          {/* Customized platforms count their own text, under Publish to. */}
+          <LimitChips
+            chips={chosenPlatforms
+              .filter((platform) => overrides[platform]?.text === undefined)
+              .flatMap((platform) => limitChips(textLimits[platform] ?? [], text, `${platformMeta(platform).label} `))}
+            label="Text limits"
           />
         </section>
 
         <section className="card space-y-4">
           <div>
             <h2 className="text-lg font-semibold">Images &amp; videos</h2>
-            <p className="text-sm text-ink-muted">Attach media by URL — the API validates it against each platform&apos;s limits.</p>
+            <p className="text-sm text-ink-muted">
+              Attach media by URL. Anything a platform cannot publish is flagged under Per-platform versions.
+            </p>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="block text-sm font-medium">
@@ -337,24 +406,13 @@ export default function Dashboard() {
                   </div>
                   <button
                     type="button"
-                    onClick={() => setMedia((items) => items.filter((existing) => existing.url !== item.url))}
+                    onClick={() => removeMedia(item.url)}
                     className="btn-ghost px-2 py-2"
                     title={`Remove ${item.url}`}
                   >
                     <TrashIcon width={16} height={16} />
                     <span className="sr-only">Remove attachment</span>
                   </button>
-                </li>
-              ))}
-            </ul>
-          )}
-
-          {warnings.length > 0 && (
-            <ul className="space-y-2">
-              {warnings.map((item) => (
-                <li key={item.platform} className="flex items-start gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
-                  <AlertIcon width={16} height={16} className="mt-0.5 shrink-0 text-amber-500" />
-                  <span>{item.reason}</span>
                 </li>
               ))}
             </ul>
@@ -375,7 +433,7 @@ export default function Dashboard() {
               </button>
             </div>
           </div>
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3" role="group" aria-label="Platforms">
             {platformIds.map((platform) => {
               const meta = platformMeta(platform);
               const checked = selected.includes(platform);
@@ -415,6 +473,32 @@ export default function Dashboard() {
               );
             })}
           </div>
+          {chosenPlatforms.length > 0 ? (
+            <div className="space-y-3 border-t border-edge pt-4">
+              <div>
+                <h3 className="text-sm font-semibold">Per-platform versions</h3>
+                <p className="text-xs text-ink-muted">Every platform publishes the post above unless you customize its text or attachments.</p>
+              </div>
+              <ul className="space-y-2" aria-label="Per-platform versions">
+                {chosenPlatforms.map((platform) => (
+                  <PlatformVersion
+                    key={platform}
+                    platform={platform}
+                    override={overrides[platform]}
+                    text={text}
+                    media={media}
+                    limits={textLimits[platform] ?? []}
+                    problems={problems?.[platform]}
+                    disabled={Boolean(busy)}
+                    onCustomize={() => updateOverride(platform, (override) => override)}
+                    onReset={() => updateOverride(platform, () => undefined)}
+                    onTextChange={(value) => updateOverride(platform, (override) => ({ ...override, text: value }))}
+                    onToggleMedia={(url) => toggleMedia(platform, url)}
+                  />
+                ))}
+              </ul>
+            </div>
+          ) : null}
           <div className="space-y-3 border-t border-edge pt-4">
             <label className="flex items-center gap-2 text-sm font-medium">
               <input type="checkbox" checked={later} onChange={(event) => setLater(event.target.checked)} className="h-4 w-4 accent-brand" />

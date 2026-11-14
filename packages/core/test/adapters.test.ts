@@ -1,5 +1,14 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { ConfigurationError, PlatformApiError, UnsupportedOperation, createAdapters, isExpired, redactSecrets } from "../src/index.js";
+import {
+  checkDraft,
+  ConfigurationError,
+  PlatformApiError,
+  TextValidationError,
+  UnsupportedOperation,
+  createAdapters,
+  isExpired,
+  redactSecrets,
+} from "../src/index.js";
 
 type Call = { url: string; init?: RequestInit };
 
@@ -122,6 +131,25 @@ describe("publishing", () => {
     const { calls, doFetch } = stubFetch([{ body: { id: "post-1" } }]);
     await createAdapters({ env, fetch: doFetch }).facebook.publish(token, { text: "Generic", perPlatformOverrides: { facebook: { text: "Tailored" } } });
     expect(JSON.parse(String(calls[0].init?.body)).message).toBe("Tailored");
+  });
+
+  it("publishes an override's attachments instead of the post's, whichever field they use", async () => {
+    const { calls, doFetch } = stubFetch([{ body: { id: "container-1" } }, { body: { id: "media-1" } }]);
+    await createAdapters({ env, fetch: doFetch }).instagram.publish(token, {
+      text: "Caption",
+      media: [{ url: "https://cdn.example/wide.jpg", kind: "image" }],
+      perPlatformOverrides: { instagram: { mediaUrls: ["https://cdn.example/square.jpg"] } },
+    });
+    expect(JSON.parse(String(calls[0].init?.body)).image_url).toBe("https://cdn.example/square.jpg");
+  });
+
+  it("refuses a YouTube title over 100 characters instead of cutting it short", async () => {
+    const { calls, doFetch } = stubFetch([]);
+    const video = [{ url: "https://cdn.example/clip.mp4", kind: "video" as const }];
+    await expect(createAdapters({ env, fetch: doFetch }).youtube.publish(token, { text: `${"t".repeat(101)}\nAbout`, media: video })).rejects.toThrow(
+      "youtube allows at most 100 characters in the title (the first line), received 101",
+    );
+    expect(calls).toHaveLength(0);
   });
 
   it("requires a connected account before publishing", async () => {
@@ -266,5 +294,37 @@ describe("mock mode", () => {
     expect(result.platformPostId).toMatch(/^linkedin-/);
     expect(adapters.linkedin.getAuthUrl("s")).toContain("auth.linkedin.example");
     expect(calls).toHaveLength(0);
+  });
+
+  it("still refuses text a platform would reject, counted in the platform's unit", async () => {
+    const adapters = createAdapters({ env: { MOCK_MODE: "true" }, fetch: stubFetch([]).doFetch });
+    const video = [{ url: "https://cdn.example/clip.mp4", kind: "video" as const }];
+    // Each emoji is two UTF-16 code units, so 1100 of them fill TikTok's 2200-unit caption.
+    await expect(adapters.tiktok.publish({ accessToken: "mock" }, { text: "😀".repeat(1100), media: video })).resolves.toMatchObject({
+      platformPostId: expect.stringMatching(/^tiktok-/),
+    });
+    await expect(adapters.tiktok.publish({ accessToken: "mock" }, { text: `${"😀".repeat(1100)}!`, media: video })).rejects.toBeInstanceOf(
+      TextValidationError,
+    );
+  });
+});
+
+describe("checking a draft", () => {
+  it("reports everything each platform would reject in its own version of the post", () => {
+    const adapters = createAdapters({ env, fetch: stubFetch([]).doFetch });
+    const post = {
+      text: "<Launch> day\nDetails",
+      media: [{ url: "https://cdn.example/a.jpg", kind: "image" as const }],
+      perPlatformOverrides: { instagram: { text: "x".repeat(2201) } },
+    };
+    expect(checkDraft(adapters.youtube, post).problems).toEqual([
+      "youtube does not support image attachments",
+      'youtube does not allow "<" or ">" in the title (the first line)',
+    ]);
+    expect(checkDraft(adapters.instagram, post)).toMatchObject({
+      ok: false,
+      problems: ["instagram allows at most 2200 characters in the caption, received 2201"],
+      text: [{ field: "caption", used: 2201, max: 2200 }],
+    });
   });
 });
