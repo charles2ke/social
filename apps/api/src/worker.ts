@@ -1,26 +1,24 @@
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
-import { redactSecrets, type MediaAttachment, type PlatformId, type PostDraft, type PublishResult } from "@social/core";
+import { redactSecrets, type PlatformId } from "@social/core";
 import {
   DEFAULT_CLAIM_TIMEOUT_MS,
   claimDuePosts,
   completePost,
   failPost,
   getPrismaClient,
-  publishTargets,
-  recordAttempt,
   releaseStaleClaims,
-  renewClaim,
   type PrismaClient,
 } from "@social/db";
 import { createAccountRepository } from "./accounts.js";
 import { createPublisher } from "./publisher.js";
+import { publishClaimedPost, type PublishFn } from "./publishing.js";
 
 export type WorkerTickResult = { claimed: number; published: number; failed: number; requeued: number };
 
 export type WorkerOptions = {
   prisma: PrismaClient;
-  publish: (platform: PlatformId, draft: PostDraft) => Promise<PublishResult>;
+  publish: PublishFn;
   /** Resolves the connected account id recorded on each attempt row. */
   accountIdFor?: (platform: PlatformId) => Promise<string | undefined>;
   workerId?: string;
@@ -29,40 +27,10 @@ export type WorkerOptions = {
   now?: Date;
 };
 
-const toPlatformId = (value: string) => value.toLowerCase() as PlatformId;
-
-/**
- * Keeps renewing the claim while `work` runs, so a worker that is merely slow
- * (a platform call can outlive the lease) is not mistaken for a dead one and
- * has its post requeued underneath it.
- */
-async function withLeaseHeartbeat<T>(
-  prisma: PrismaClient,
-  postId: string,
-  claimToken: string | undefined,
-  claimTimeoutMs: number,
-  work: () => Promise<T>,
-): Promise<T> {
-  if (!claimToken) return work();
-  const heartbeat = setInterval(() => {
-    void renewClaim(prisma, postId, claimToken, { claimTimeoutMs }).catch(() => undefined);
-  }, Math.max(1_000, Math.floor(claimTimeoutMs / 3)));
-  heartbeat.unref();
-  try {
-    return await work();
-  } finally {
-    clearInterval(heartbeat);
-  }
-}
-
 /**
  * One scheduler tick: requeue leases abandoned by dead workers, claim the due
- * posts this worker may publish, and publish each of them.
- *
- * Only platforms without a recorded SUCCESS are re-sent, so a post that
- * partially published and was retried never double-posts to a platform that
- * already accepted it, and a platform whose attempt was interrupted mid-call
- * is left for reconciliation rather than published again.
+ * posts this worker may publish, and publish each of them (see
+ * `publishClaimedPost` for how retries avoid double-posting).
  */
 export async function runWorkerTick(options: WorkerOptions): Promise<WorkerTickResult> {
   const { prisma } = options;
@@ -82,60 +50,12 @@ export async function runWorkerTick(options: WorkerOptions): Promise<WorkerTickR
 
   for (const post of posts) {
     const claimToken = post.claimToken ?? undefined;
-    const { pending, unconfirmed } = await publishTargets(prisma, post.id, post.platforms);
-    const draft: PostDraft = {
-      id: post.id,
-      text: post.content,
-      media: Array.isArray(post.mediaUrls) ? (post.mediaUrls as unknown as MediaAttachment[]) : [],
-    };
-
-    const errors: string[] = [];
-    // A platform whose attempt is still PENDING was interrupted between the
-    // provider call and its outcome being stored, so the post may already be
-    // live there. Republishing it could duplicate the external post, so it is
-    // surfaced for reconciliation instead.
-    if (unconfirmed.length) {
-      errors.push(`${unconfirmed.map(toPlatformId).join(", ")}: previous publish outcome is unknown — reconcile the post on the platform before retrying`);
-    }
-    if (!post.platforms.length) {
-      errors.push("no target platforms — the post cannot be published");
-    }
-
-    let leaseHeld = true;
-    await withLeaseHeartbeat(prisma, post.id, claimToken, claimTimeoutMs, async () => {
-      for (const target of pending) {
-        // Renew before each provider call too: losing the lease means another
-        // worker owns the post now, so this one must stop publishing.
-        leaseHeld = claimToken ? await renewClaim(prisma, post.id, claimToken, { claimTimeoutMs }) : true;
-        if (!leaseHeld) break;
-        const platform = toPlatformId(target);
-        const accountId = await options.accountIdFor?.(platform);
-        // Recorded before the call so a crash in the publish window leaves a
-        // PENDING row rather than looking like an attempt that never happened.
-        await recordAttempt(prisma, { postId: post.id, platform: target, accountId: accountId ?? null, status: "PENDING" });
-        try {
-          const result = await options.publish(platform, draft);
-          await recordAttempt(prisma, {
-            postId: post.id,
-            platform: target,
-            accountId: accountId ?? null,
-            status: "SUCCESS",
-            externalPostId: result.platformPostId,
-            completedAt: new Date(),
-          });
-        } catch (error) {
-          const message = redactSecrets(error instanceof Error ? error.message : "Publishing failed");
-          errors.push(`${platform}: ${message}`);
-          await recordAttempt(prisma, {
-            postId: post.id,
-            platform: target,
-            accountId: accountId ?? null,
-            status: "FAILED",
-            error: message,
-            completedAt: new Date(),
-          });
-        }
-      }
+    const { leaseHeld, errors } = await publishClaimedPost({
+      prisma,
+      post,
+      publish: options.publish,
+      accountIdFor: options.accountIdFor,
+      claimTimeoutMs,
     });
 
     if (!leaseHeld) continue;

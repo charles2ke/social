@@ -1,14 +1,36 @@
 "use client";
 import Link from "next/link";
-import { FormEvent, KeyboardEvent, useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { FormEvent, KeyboardEvent, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { apiUrl } from "./config";
 import { AlertIcon, CheckIcon, ClockIcon, LinkIcon, PlatformIcon, PlusIcon, TrashIcon } from "./icons";
 import { platformIds, platformMeta, publishablePlatformIds } from "./platforms";
 import { inferMediaKind, isHttpUrl, safeMediaSrc, type MediaAttachment } from "./media";
+import {
+  ApiError,
+  callApi,
+  errorMessage,
+  isEditable,
+  type PostStatus,
+  type PublishNowResponse,
+  type PublishResult,
+  type StoredPost,
+} from "./posts";
+import { StatusBadge } from "./components/post-status";
+import { StorageNotice, useStorageMode } from "./components/storage-notice";
 
 type Compatibility = { platform: string; compatible: boolean; reason?: string };
-type PublishResult = { platform: string; status: "published" | "failed"; url?: string; error?: string };
-type Status = { message: string; tone: "info" | "error" | "success" };
+/** `postsLink` appends a link to the Posts page, where the saved post can be found. */
+type Status = { message: string; tone: "info" | "warning" | "error" | "success"; postsLink?: boolean };
+type Action = "loading" | "saving" | "publishing" | "scheduling";
+
+const defaultPlatforms = ["instagram"];
+
+const editingHints: Partial<Record<PostStatus, string>> = {
+  draft: "Editing a saved draft.",
+  scheduled: "Editing a scheduled post — changes apply when you update the schedule.",
+  failed: "Editing a failed post — publishing again skips the platforms that already succeeded.",
+};
 
 /** `datetime-local` needs a local `YYYY-MM-DDTHH:mm` value, not the UTC string `toISOString()` returns. */
 function toLocalInputValue(date: Date): string {
@@ -16,9 +38,29 @@ function toLocalInputValue(date: Date): string {
   return local.toISOString().slice(0, 16);
 }
 
+/**
+ * Reports the `?post=<id>` the composer should open. `useSearchParams` opts
+ * its subtree out of static prerendering, so it sits in its own Suspense
+ * boundary and the rest of the composer still prerenders.
+ */
+function PostParam({ onChange }: { onChange: (id: string | null) => void }) {
+  const id = useSearchParams().get("post");
+  useLayoutEffect(() => {
+    onChange(id);
+  }, [id, onChange]);
+  return null;
+}
+
 export default function Dashboard() {
+  const router = useRouter();
+  const storage = useStorageMode();
+  /** The stored post being edited; unset while composing a new one. */
+  const [post, setPost] = useState<{ id: string; status: PostStatus } | undefined>(undefined);
+  // Tracks the post id synchronously, so the composer's own URL updates are not mistaken for navigation.
+  const currentId = useRef<string | undefined>(undefined);
+  const session = useRef(0);
   const [text, setText] = useState("");
-  const [selected, setSelected] = useState(["instagram"]);
+  const [selected, setSelected] = useState(defaultPlatforms);
   const [media, setMedia] = useState<MediaAttachment[]>([]);
   const [mediaUrl, setMediaUrl] = useState("");
   const [altText, setAltText] = useState("");
@@ -27,7 +69,9 @@ export default function Dashboard() {
   const [status, setStatus] = useState<Status | undefined>(undefined);
   const [later, setLater] = useState(false);
   const [scheduledFor, setScheduledFor] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<Action | undefined>(undefined);
+
+  useLayoutEffect(() => () => { session.current += 1; currentId.current = undefined; }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -64,6 +108,91 @@ export default function Dashboard() {
     addMedia();
   };
 
+  /** Points the composer (and its URL) at a stored post, or back at a new one. */
+  const track = useCallback(
+    (stored: StoredPost | undefined) => {
+      currentId.current = stored?.id;
+      setPost(stored ? { id: stored.id, status: stored.status } : undefined);
+      router.replace(stored ? `/?post=${encodeURIComponent(stored.id)}` : "/", { scroll: false });
+    },
+    [router],
+  );
+
+  const resetForm = useCallback(() => {
+    setText(""); setMedia([]); setMediaUrl(""); setAltText(""); setSelected(defaultPlatforms);
+    setLater(false); setScheduledFor(""); setResults([]); setStatus(undefined);
+  }, []);
+
+  const load = useCallback(
+    async (id: string) => {
+      currentId.current = id;
+      const activeSession = session.current;
+      setBusy("loading"); setResults([]); setStatus({ message: "Loading the post…", tone: "info" });
+      try {
+        const stored = await callApi<StoredPost>(`/posts/${encodeURIComponent(id)}`);
+        if (session.current !== activeSession) return;
+        setText(stored.text); setMedia(stored.media);
+        setSelected(stored.platforms.filter((platform) => publishablePlatformIds.includes(platform)));
+        const scheduled = stored.status === "scheduled" && stored.scheduledFor ? new Date(stored.scheduledFor) : undefined;
+        setLater(Boolean(scheduled)); setScheduledFor(scheduled ? toLocalInputValue(scheduled) : "");
+        if (isEditable(stored.status)) {
+          setPost({ id: stored.id, status: stored.status }); setStatus(undefined);
+          return;
+        }
+        // A published, cancelled or in-flight post cannot change, so its content starts a new post instead.
+        track(undefined);
+        setStatus({ message: `That post is ${stored.status}, so it was copied into a new post.`, tone: "info" });
+      } catch (error) {
+        if (session.current !== activeSession) return;
+        track(undefined);
+        setStatus({ message: error instanceof ApiError && error.status === 404 ? "That post no longer exists." : errorMessage(error), tone: "error" });
+      } finally {
+        if (session.current === activeSession) setBusy(undefined);
+      }
+    },
+    [track],
+  );
+
+  const onPostParam = useCallback(
+    (id: string | null) => {
+      if ((id ?? undefined) === currentId.current) return;
+      session.current += 1;
+      if (id) { void load(id); return; }
+      // Navigated back to a bare "/" (e.g. the Composer link) while editing: start a new post.
+      currentId.current = undefined; setPost(undefined); setBusy(undefined); resetForm();
+    },
+    [load, resetForm],
+  );
+
+  const startNew = () => { session.current += 1; track(undefined); resetForm(); };
+
+  const fail = (error: unknown) => {
+    if (error instanceof ApiError && error.status === 409 && error.post && !isEditable(error.post.status)) {
+      // Someone else (usually the scheduler worker) moved the post on; keep the edits as a new post rather than lose them.
+      track(undefined);
+      setStatus({ message: `${error.message}, so your edits are kept here as a new post.`, tone: "error", postsLink: true });
+      return;
+    }
+    setStatus({ message: errorMessage(error), tone: "error" });
+  };
+
+  const saveDraft = async () => {
+    if (busy) return;
+    if (!text.trim() && media.length === 0) { setStatus({ message: "Write something or attach media before saving", tone: "error" }); return; }
+    const activeSession = session.current;
+    setBusy("saving"); setResults([]); setStatus({ message: "Saving…", tone: "info" });
+    try {
+      const content = { text, media, platforms: selected };
+      const saved = post
+        ? await callApi<StoredPost>(`/drafts/${encodeURIComponent(post.id)}`, { body: content })
+        : await callApi<StoredPost>("/drafts", { body: content });
+      if (session.current !== activeSession) return;
+      track(saved);
+      setStatus({ message: post ? "Changes saved." : "Draft saved.", tone: "success", postsLink: true });
+    } catch (error) { if (session.current === activeSession) fail(error); }
+    finally { if (session.current === activeSession) setBusy(undefined); }
+  };
+
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (busy) return;
@@ -76,39 +205,83 @@ export default function Dashboard() {
       if (when.getTime() <= Date.now()) { setStatus({ message: "Pick a time in the future, or publish now", tone: "error" }); return; }
     }
 
-    setBusy(true); setResults([]); setStatus({ message: when ? "Scheduling…" : "Publishing…", tone: "info" });
+    const activeSession = session.current;
+    setBusy(when ? "scheduling" : "publishing"); setResults([]); setStatus({ message: when ? "Scheduling…" : "Publishing…", tone: "info" });
+    const content = { text, media, platforms: selected };
     try {
-      const response = await fetch(`${apiUrl}${when ? "/schedule" : "/publish"}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, platforms: selected, media, ...(when ? { scheduledFor: when.toISOString() } : {}) }),
-      });
-      const body: unknown = await response.json().catch(() => undefined);
-      if (!response.ok) {
-        setStatus({ message: (body as { error?: string })?.error ?? `${when ? "Scheduling" : "Publishing"} failed (${response.status})`, tone: "error" });
-        return;
-      }
       if (when) {
-        setStatus({ message: `Queued for ${when.toLocaleString()} — the scheduler worker publishes it.`, tone: "success" });
+        const scheduled = await callApi<StoredPost>("/schedule", {
+          body: { ...content, scheduledFor: when.toISOString(), ...(post ? { id: post.id } : {}) },
+        });
+        if (session.current !== activeSession) return;
+        track(scheduled);
+        setStatus(
+          storage === "memory"
+            ? { message: `Saved for ${when.toLocaleString()}, but this API keeps posts in memory, so it will not be published.`, tone: "warning", postsLink: true }
+            : { message: `Queued for ${when.toLocaleString()} — the scheduler worker publishes it.`, tone: "success", postsLink: true },
+        );
         return;
       }
-      setResults(Array.isArray(body) ? (body as PublishResult[]) : []); setStatus(undefined);
-    } catch { setStatus({ message: "Could not reach the API", tone: "error" }); }
-    finally { setBusy(false); }
+      // Publishing goes through a stored post, so it shows up in Posts and a failed platform can be retried.
+      let target = post;
+      if (!target) {
+        const created = await callApi<StoredPost>("/drafts", { body: content });
+        if (session.current !== activeSession) return;
+        track(created);
+        target = created;
+      }
+      const published = await callApi<PublishNowResponse>(`/posts/${encodeURIComponent(target.id)}/publish`, { body: content });
+      if (session.current !== activeSession) return;
+      setResults(published.results);
+      if (published.post.status === "published") {
+        track(undefined);
+        setStatus({ message: "Published.", tone: "success", postsLink: true });
+      } else {
+        track(published.post);
+        setStatus({
+          message: "Some platforms failed, so the post was saved as failed. Fix it and publish again — platforms that already succeeded are skipped.",
+          tone: "error",
+          postsLink: true,
+        });
+      }
+    } catch (error) { if (session.current === activeSession) fail(error); }
+    finally { if (session.current === activeSession) setBusy(undefined); }
   };
+
+  const primaryLabel =
+    busy === "scheduling" ? "Scheduling…" : busy === "publishing" ? "Publishing…" : later ? (post?.status === "scheduled" ? "Update schedule" : "Schedule post") : "Publish now";
 
   return (
     <main className="space-y-6">
       <section className="card bg-gradient-to-br from-brand/10 to-transparent">
         <h1 className="text-2xl font-bold tracking-tight">Compose once, publish everywhere</h1>
         <p className="mt-1 text-sm text-ink-muted">
-          Draft a post, attach media, and fan it out to every connected platform — right now or on a schedule. New here?{" "}
+          Draft a post, attach media, and fan it out to every connected platform — right now or on a schedule. Saved drafts, the queue and
+          history live in{" "}
+          <Link href="/posts" className="font-medium text-brand underline-offset-2 hover:underline">
+            Posts
+          </Link>
+          . New here?{" "}
           <Link href="/setup" className="font-medium text-brand underline-offset-2 hover:underline">
             Finish setup
           </Link>
           .
         </p>
       </section>
+
+      <Suspense fallback={null}>
+        <PostParam onChange={onPostParam} />
+      </Suspense>
+
+      {post ? (
+        <section className="card flex flex-wrap items-center gap-3 py-3" aria-label="Editing a saved post">
+          <StatusBadge status={post.status} />
+          <p className="text-sm text-ink-muted">{editingHints[post.status]}</p>
+          <button type="button" onClick={startNew} className="btn-ghost ml-auto px-3 py-1.5 text-xs" disabled={Boolean(busy)}>
+            <PlusIcon width={14} height={14} /> New post
+          </button>
+        </section>
+      ) : null}
 
       <form onSubmit={submit} className="space-y-6">
         <section className="card space-y-3">
@@ -270,16 +443,25 @@ export default function Dashboard() {
                   className="field mt-1 font-normal"
                 />
                 <span className="mt-1 block text-xs font-normal text-ink-muted">
-                  Queued in Postgres and published by the scheduler worker, in your local time zone.
+                  {storage === "postgres"
+                    ? "Queued in Postgres and published by the scheduler worker, in your local time zone."
+                    : "In your local time zone; the scheduler worker publishes it."}
                 </span>
               </label>
             ) : null}
+            {later ? <StorageNotice mode={storage} /> : null}
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
-            <button type="submit" className="btn-primary w-full sm:w-auto" disabled={busy || selected.length === 0}>
-              {busy ? (later ? "Scheduling…" : "Publishing…") : later ? "Schedule post" : "Publish now"}
+            <button type="submit" className="btn-primary w-full sm:w-auto" disabled={Boolean(busy) || selected.length === 0}>
+              {primaryLabel}
             </button>
+            {/* A scheduled post is saved through "Update schedule", which keeps its content and time together. */}
+            {post?.status !== "scheduled" ? (
+              <button type="button" onClick={saveDraft} className="btn-ghost w-full sm:w-auto" disabled={Boolean(busy)}>
+                {busy === "saving" ? "Saving…" : post?.status === "failed" ? "Save changes" : "Save draft"}
+              </button>
+            ) : null}
             {selected.length === 0 ? <span className="text-sm text-ink-muted">Pick at least one platform first.</span> : null}
           </div>
         </section>
@@ -289,10 +471,24 @@ export default function Dashboard() {
         {status ? (
           <p
             className={`card py-3 text-sm ${
-              status.tone === "error" ? "border-rose-500/40 text-rose-500" : status.tone === "success" ? "border-emerald-500/40 text-emerald-600" : ""
+              status.tone === "error"
+                ? "border-rose-500/40 text-rose-500"
+                : status.tone === "warning"
+                  ? "border-amber-500/40 text-amber-600 dark:text-amber-400"
+                  : status.tone === "success"
+                    ? "border-emerald-500/40 text-emerald-600"
+                    : ""
             }`}
           >
             {status.message}
+            {status.postsLink ? (
+              <>
+                {" "}
+                <Link href="/posts" className="font-medium text-brand underline-offset-2 hover:underline">
+                  View in Posts
+                </Link>
+              </>
+            ) : null}
           </p>
         ) : null}
         {results.length > 0 && (

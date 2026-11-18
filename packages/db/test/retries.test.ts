@@ -3,6 +3,7 @@ import { createPrismaClient } from "../src/client.js";
 import {
   backoffDelayMs,
   claimDuePosts,
+  claimPost,
   completePost,
   failPost,
   pendingPlatforms,
@@ -154,6 +155,15 @@ describe("completePost", () => {
     expect(published?.lastError).toBeNull();
   });
 
+  it("records the error when a claimed post fails for good", async () => {
+    const post = await duePost();
+    const [claimed] = await claimDuePosts(prisma, "worker-a");
+
+    const failed = await completePost(prisma, post.id, "FAILED", { claimToken: claimed?.claimToken ?? "", lastError: "linkedin: 500" });
+
+    expect(failed).toMatchObject({ status: "FAILED", lastError: "linkedin: 500", claimToken: null, claimExpiresAt: null });
+  });
+
   it("refuses to publish under a claim token that is no longer current", async () => {
     const post = await duePost();
     const [claimed] = await claimDuePosts(prisma, "slow-worker", { claimTimeoutMs: -1 });
@@ -162,6 +172,50 @@ describe("completePost", () => {
 
     expect(await completePost(prisma, post.id, "PUBLISHED", { claimToken: claimed?.claimToken ?? "" })).toBeNull();
     expect((await prisma.post.findUniqueOrThrow({ where: { id: post.id } })).claimedBy).toBe("worker-b");
+  });
+});
+
+describe("claimPost", () => {
+  it("claims a draft immediately, applying changes and starting a fresh retry budget", async () => {
+    const post = await duePost({ status: "DRAFT", scheduledFor: null, attemptCount: 3, nextAttemptAt: new Date(Date.now() + 60_000) });
+    const now = new Date();
+
+    const claimed = await claimPost(prisma, post.id, "api-1", {
+      now,
+      claimTimeoutMs: 60_000,
+      data: { content: "edited", platforms: ["FACEBOOK"] },
+    });
+
+    expect(claimed).toMatchObject({ status: "PUBLISHING", content: "edited", platforms: ["FACEBOOK"], claimedBy: "api-1", attemptCount: 1, nextAttemptAt: null });
+    expect(claimed?.scheduledFor?.getTime()).toBe(now.getTime());
+    expect(claimed?.claimExpiresAt?.getTime()).toBe(now.getTime() + 60_000);
+  });
+
+  it("refuses a post the worker already claimed, or one that is terminal", async () => {
+    const queued = await duePost();
+    await claimDuePosts(prisma, "worker-a");
+    const published = await duePost({ status: "PUBLISHED" });
+
+    expect(await claimPost(prisma, queued.id, "api-1")).toBeNull();
+    expect(await claimPost(prisma, published.id, "api-1")).toBeNull();
+  });
+
+  it("lets only one of two concurrent claims win", async () => {
+    const post = await duePost({ status: "DRAFT" });
+
+    const claims = await Promise.all([claimPost(prisma, post.id, "api-1"), claimPost(prisma, post.id, "api-2")]);
+
+    expect(claims.filter(Boolean)).toHaveLength(1);
+  });
+
+  it("leaves an abandoned immediate publish for the worker to finish", async () => {
+    const post = await duePost({ status: "DRAFT", scheduledFor: null });
+    await claimPost(prisma, post.id, "api-1", { claimTimeoutMs: -1 });
+
+    expect(await releaseStaleClaims(prisma)).toEqual({ requeued: 1, failed: 0 });
+    const requeued = await prisma.post.findUniqueOrThrow({ where: { id: post.id } });
+    expect(requeued.status).toBe("SCHEDULED");
+    expect(requeued.scheduledFor).not.toBeNull();
   });
 });
 
