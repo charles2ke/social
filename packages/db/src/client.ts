@@ -1,7 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 
 /**
- * Consumers of this package (the Next.js web app and the MCP server) run as
+ * Consumers of this package (the API and the scheduler worker) run as
  * separate processes and should each configure their own pool size via
  * DATABASE_CONNECTION_LIMIT, since Prisma's default pool sizing assumes a
  * single consumer. See README.md "Connection pooling" for guidance on
@@ -47,8 +47,8 @@ export function createPrismaClient(
 let sharedClient: PrismaClient | undefined;
 
 /**
- * Lazily-created, process-wide singleton. Both the web app and the MCP
- * server should call this once at startup rather than instantiating
+ * Lazily-created, process-wide singleton. Both the API and the scheduler
+ * worker should call this once at startup rather than instantiating
  * PrismaClient directly, so that the connection pool is sized once per
  * process (see DATABASE_CONNECTION_LIMIT).
  */

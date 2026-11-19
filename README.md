@@ -43,8 +43,9 @@ card per platform with its required environment variables and a connect link.
 - **Encrypted credentials** — OAuth tokens are AES-256-GCM encrypted at rest,
   refreshed automatically, and redacted from logs and API responses.
 - **Mock mode** — a full end-to-end demo with no platform credentials.
-- **MCP server** — drive drafts, publishing and analytics from an MCP client
-  such as Claude Desktop or VS Code.
+- **MCP server** — draft, publish and schedule posts from an MCP client such
+  as Claude Desktop or VS Code. It works through the API, so it shares the
+  dashboard's posts, connected accounts and scheduler.
 - **Self-hosted** — AGPL-3.0, runs from a single `docker compose up`.
 
 ## Contents
@@ -64,9 +65,9 @@ card per platform with its required environment variables and a connect link.
 - [Contributing, security and license](#contributing-security-and-license)
 
 ```text
-Web (apps/web) ──► API (apps/api) ──► Core adapters/scheduler (packages/core)
-MCP stdio server ───────────────────► Core adapters/scheduler
-                                      └── PostgreSQL / Prisma (packages/db)
+Web (apps/web) ─────┐
+MCP stdio server ───┴─► API (apps/api) ──► Core adapters/scheduler (packages/core)
+                                           └── PostgreSQL / Prisma (packages/db)
 ```
 
 ## Quick start
@@ -101,7 +102,7 @@ A pnpm workspace monorepo:
 | [`apps/api`](apps/api) | Fastify API (`src/index.ts`) and scheduler worker (`src/worker.ts`) |
 | [`packages/core`](packages/core) | Platform adapters, OAuth, crypto, media rules, shared types |
 | [`packages/db`](packages/db) | Prisma schema, migrations, scheduler claim loop |
-| [`packages/mcp-server`](packages/mcp-server) | MCP stdio server |
+| [`packages/mcp-server`](packages/mcp-server) | MCP stdio server, a client of the API |
 | [`docs/adr`](docs/adr) | Architecture decision records |
 
 Workspace scripts (run from the root, prefixed with `corepack pnpm`):
@@ -264,7 +265,7 @@ out-of-band in production (`ALTER ROLE social_worker WITH PASSWORD '...'`)
 
 ### Connection pooling
 
-The Next.js app and the MCP server are separate processes and each open
+The API and the scheduler worker are separate processes and each open
 their own Prisma connection pool. `packages/db`'s `createPrismaClient()`
 sizes the pool from `DATABASE_CONNECTION_LIMIT` (default 5) — set this
 per-consumer in each service's environment.
@@ -416,18 +417,41 @@ tokens never reach the database or the API response.
 
 ## MCP
 
-The MCP server shares `@social/core` with the web/API and exposes account,
-draft, publishing, scheduling, status, and analytics tools plus
-`social://accounts` and `social://posts/{id}` resources.
+The MCP server (`packages/mcp-server`) lets an MCP client such as Claude
+Desktop or VS Code draft, publish and schedule posts. It is a client of the
+API, so it works on the same posts the dashboard shows, publishes as the
+accounts connected there, and queues posts for the same scheduler worker.
+Start the API first, and the worker too if you schedule posts.
 
 ```json
-{ "mcpServers": { "social": { "command": "node", "args": ["/absolute/path/to/social/packages/mcp-server/dist/mcp-server/src/index.js"], "env": { "MOCK_MODE": "true", "ENCRYPTION_KEY": "your-64-hex-character-key" } } } }
+{ "mcpServers": { "social": { "command": "node", "args": ["/absolute/path/to/social/packages/mcp-server/dist/mcp-server/src/index.js"], "env": { "SOCIAL_API_URL": "http://localhost:3001", "ADMIN_TOKEN": "your-api-admin-token" } } } }
 ```
 
 Use this in `claude_desktop_config.json` or VS Code MCP settings after
-`corepack pnpm build`. It includes the `cross_platform_announcement` prompt.
-The MCP server publishes with the single `SOCIAL_ACCESS_TOKEN` fallback; it
-does not yet read the connected accounts the API stores in Postgres.
+`corepack pnpm build`. `SOCIAL_API_URL` is where the API listens (default
+`http://localhost:3001`). Set `ADMIN_TOKEN` to the API's `ADMIN_TOKEN` and
+keep that config file private, since the token grants full access to the
+API. Leave it out only when the API runs without one, as the mock-mode demo
+can.
+
+| Tools | Purpose |
+| --- | --- |
+| `list_platforms` | Each platform's capabilities, media constraints and text limits |
+| `list_accounts`, `get_account_status` | Connected accounts, and whether a platform has one to publish as |
+| `create_draft`, `update_draft`, `list_drafts` | Save and edit drafts, including each platform's own version (`perPlatformOverrides`) |
+| `validate_post` | Check a post against each platform's limits without saving it |
+| `publish_post`, `publish_saved_post` | Publish new content or a saved post now; `publish_saved_post` also retries a partly failed post |
+| `schedule_post`, `schedule_saved_post`, `list_scheduled`, `cancel_scheduled` | Queue posts for the worker, move them to a new time, and cancel them |
+| `list_posts`, `get_post_status` | Posts by status, with each platform's latest result |
+| `get_analytics` | A published post's metrics from its platform |
+
+`publish_post` saves the post before publishing it, so it shows under
+**Posts** with each platform's result and a platform that failed can be
+retried. API errors come back as tool errors the model can read, with tokens
+redacted. When the API has no `DATABASE_URL`, scheduling still succeeds, but
+the tool warns that the post is only kept in memory and will never be
+published. The server also provides the `social://accounts` and
+`social://posts/{id}` resources and the `cross_platform_announcement` prompt.
 
 ## Development
 
@@ -446,6 +470,10 @@ that keeps posts in memory, on ports 3200 and 3201 (override them with
 `apps/web/.next`, which `next dev` also uses, so stop `corepack pnpm dev`
 first. Install the browser once with
 `corepack pnpm --filter @social/web exec playwright install --with-deps chromium`.
+
+Besides the dashboard, `apps/web/e2e/mcp.e2e.ts` builds the MCP server,
+drives it over stdio the way an MCP client does, and checks that its drafts,
+scheduled posts and publish results show up on the Posts page.
 
 The tests save full-page screenshots of each step to
 `apps/web/test-results/screenshots`, and the HTML report goes to
