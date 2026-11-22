@@ -6,6 +6,7 @@ export const facebookSpec: PlatformSpec = {
   id: "facebook",
   capabilities: { text: true, image: true, video: true, schedule: true, analytics: true },
   mediaConstraints: { maxAttachments: 10, allowsMixedKinds: false },
+  textConstraints: { maxLength: 63206 },
   oauth: metaOAuth(["pages_show_list", "pages_manage_posts", "pages_read_engagement", "read_insights"]),
   async getProfile(ctx) {
     // Publishing targets a Page feed, so the connected identity must be the Page the

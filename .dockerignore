@@ -1,0 +1,17 @@
+.git
+.github
+docs
+**/node_modules
+**/dist
+**/.next
+**/out
+**/*.tsbuildinfo
+**/coverage
+**/playwright-report
+**/test-results
+**/*.log
+packages/*/generated
+# Secrets reach containers at runtime (docker-compose.yml env_file), never the image.
+.env
+.env.*
+!.env.example

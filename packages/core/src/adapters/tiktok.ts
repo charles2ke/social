@@ -10,6 +10,7 @@ export const tiktokSpec: PlatformSpec = {
   id: "tiktok",
   capabilities: { text: true, image: false, video: true, schedule: true, analytics: true },
   mediaConstraints: { maxAttachments: 1, allowsMixedKinds: false, requiresKind: "video" },
+  textConstraints: { maxLength: 2200 },
   oauth: {
     authorizeUrl: "https://www.tiktok.com/v2/auth/authorize/",
     tokenUrl: `${API}/oauth/token/`,

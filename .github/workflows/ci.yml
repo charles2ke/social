@@ -65,3 +65,14 @@ jobs:
             apps/web/playwright-report
             apps/web/test-results
           retention-days: 14
+
+  docker:
+    # Builds the production image and validates the compose file, so a broken
+    # Dockerfile fails CI instead of the next `docker compose up --build`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate docker-compose.yml
+        run: cp .env.example .env && docker compose config --quiet
+      - name: Build image
+        run: docker build --tag social-app:ci .

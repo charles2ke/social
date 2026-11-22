@@ -1,5 +1,6 @@
 import { apiUrl } from "./config";
 import type { MediaAttachment } from "./media";
+import { clearSession, sessionToken } from "./session";
 
 /** Mirrors `StoredPost` in apps/api/src/posts.ts. */
 export type PostStatus = "draft" | "scheduled" | "publishing" | "published" | "failed" | "cancelled";
@@ -9,6 +10,8 @@ export type StoredPost = {
   text: string;
   media: MediaAttachment[];
   platforms: string[];
+  /** Text that replaces `text` on individual platforms. */
+  platformOverrides?: Record<string, { text: string }>;
   status: PostStatus;
   scheduledFor?: string;
   nextAttemptAt?: string;
@@ -52,16 +55,31 @@ export class ApiError extends Error {
   }
 }
 
-/** Calls the API with an optional JSON body, throwing `ApiError` for an error reply. */
+/**
+ * Calls the API with an optional JSON body and the signed-in session, throwing
+ * `ApiError` for an error reply. A 401 drops the session, which brings back
+ * the sign-in form.
+ */
 export async function callApi<T>(path: string, init: { method?: "GET" | "POST"; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
   const hasBody = init.body !== undefined;
+  const token = sessionToken();
   const response = await fetch(`${apiUrl}${path}`, {
     method: init.method ?? (hasBody ? "POST" : "GET"),
-    ...(hasBody ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(init.body) } : {}),
+    headers: {
+      Accept: "application/json",
+      ...(hasBody ? { "Content-Type": "application/json" } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    ...(hasBody ? { body: JSON.stringify(init.body) } : {}),
     signal: init.signal,
   });
   const body: unknown = await response.json().catch(() => undefined);
   if (!response.ok) {
+    if (response.status === 401) {
+      // Unless a newer session was stored while this request was in flight.
+      if (sessionToken() === token) clearSession();
+      throw new ApiError("Your session has ended. Sign in and try again.", 401);
+    }
     const error = body as { error?: string; post?: StoredPost } | undefined;
     throw new ApiError(error?.error ?? `Request failed (${response.status})`, response.status, error?.post);
   }

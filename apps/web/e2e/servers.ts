@@ -6,3 +6,6 @@ export const webPort = Number(process.env.E2E_WEB_PORT ?? (docsScreenshots ? 300
 export const apiPort = Number(process.env.E2E_API_PORT ?? (docsScreenshots ? 3001 : 3201));
 export const webOrigin = `http://localhost:${webPort}`;
 export const apiOrigin = `http://localhost:${apiPort}`;
+
+/** The e2e API's ADMIN_TOKEN: a fixed test value, never a real secret. */
+export const adminToken = process.env.E2E_ADMIN_TOKEN ?? "e2e-admin-token-for-tests-only-0123456789";

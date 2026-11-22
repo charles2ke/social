@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { redactSecrets, type MediaAttachment, type PlatformId, type PostDraft } from "@social/core";
+import { redactSecrets, type MediaAttachment, type PlatformId, type PlatformOverrides, type PostDraft } from "@social/core";
+import { hasOverrides, storedOverrides } from "./overrides.js";
 import type { PlatformOutcome, PublishFn } from "./publishing.js";
+import { stringEnv } from "./env.js";
 
 export type PostStatus = "draft" | "scheduled" | "publishing" | "published" | "failed" | "cancelled";
 
@@ -9,6 +11,8 @@ export type StoredPost = {
   text: string;
   media: MediaAttachment[];
   platforms: PlatformId[];
+  /** Text that replaces `text` on individual platforms; absent when there is none. */
+  platformOverrides?: PlatformOverrides;
   status: PostStatus;
   scheduledFor?: string;
   nextAttemptAt?: string;
@@ -17,7 +21,14 @@ export type StoredPost = {
   attempts?: { platform: PlatformId; status: string; externalPostId?: string; error?: string }[];
 };
 
-export type PostInput = { text: string; media?: MediaAttachment[]; platforms?: PlatformId[]; scheduledFor?: Date };
+export type PostInput = {
+  text: string;
+  media?: MediaAttachment[];
+  platforms?: PlatformId[];
+  /** Replaces all of a post's overrides when given; `{}` removes them. */
+  platformOverrides?: PlatformOverrides;
+  scheduledFor?: Date;
+};
 
 /** How a repository reaches the platforms when a stored post is published immediately. */
 export type PostPublisher = {
@@ -67,8 +78,24 @@ const cancellable = new Set<PostStatus>(["draft", "scheduled", "failed"]);
 const editable = new Set<PostStatus>(["draft", "scheduled", "failed"]);
 export const isEditable = (status: PostStatus) => editable.has(status);
 
-const draftOf = (post: StoredPost): PostDraft => ({ id: post.id, text: post.text, media: post.media });
-export { draftOf };
+export const draftOf = (post: StoredPost): PostDraft => ({
+  id: post.id,
+  text: post.text,
+  media: post.media,
+  ...(post.platformOverrides ? { perPlatformOverrides: post.platformOverrides } : {}),
+});
+
+/** Applies content changes to an in-memory post, dropping the overrides key when they are cleared. */
+function withChanges(post: StoredPost, changes: Partial<PostInput> = {}): StoredPost {
+  const { platformOverrides, ...rest } = {
+    ...post,
+    ...(changes.text !== undefined ? { text: changes.text } : {}),
+    ...(changes.media !== undefined ? { media: changes.media } : {}),
+    ...(changes.platforms !== undefined ? { platforms: changes.platforms } : {}),
+    ...(changes.platformOverrides !== undefined ? { platformOverrides: changes.platformOverrides } : {}),
+  };
+  return hasOverrides(platformOverrides) ? { ...rest, platformOverrides } : rest;
+}
 
 /** Used when no DATABASE_URL is configured (e.g. the mock-mode demo). */
 export function createMemoryPostRepository(): PostRepository {
@@ -86,7 +113,7 @@ export function createMemoryPostRepository(): PostRepository {
       return posts.get(id);
     },
     async create(input) {
-      return put({
+      return put(withChanges({
         id: randomUUID(),
         text: input.text,
         media: input.media ?? [],
@@ -94,17 +121,14 @@ export function createMemoryPostRepository(): PostRepository {
         status: input.scheduledFor ? "scheduled" : "draft",
         scheduledFor: input.scheduledFor?.toISOString(),
         createdAt: new Date().toISOString(),
-      });
+      }, { platformOverrides: input.platformOverrides }));
     },
     async update(id, changes) {
       const post = posts.get(id);
       if (!post) return undefined;
       if (!editable.has(post.status)) return post;
       return put({
-        ...post,
-        ...(changes.text !== undefined ? { text: changes.text } : {}),
-        ...(changes.media !== undefined ? { media: changes.media } : {}),
-        ...(changes.platforms !== undefined ? { platforms: changes.platforms } : {}),
+        ...withChanges(post, changes),
         ...(changes.scheduledFor !== undefined ? { scheduledFor: changes.scheduledFor.toISOString() } : {}),
       });
     },
@@ -112,14 +136,7 @@ export function createMemoryPostRepository(): PostRepository {
       const post = posts.get(id);
       if (!post) return undefined;
       if (!schedulable.has(post.status)) return post;
-      return put({
-        ...post,
-        ...(changes?.text !== undefined ? { text: changes.text } : {}),
-        ...(changes?.media !== undefined ? { media: changes.media } : {}),
-        ...(changes?.platforms !== undefined ? { platforms: changes.platforms } : {}),
-        status: "scheduled",
-        scheduledFor: scheduledFor.toISOString(),
-      });
+      return put({ ...withChanges(post, changes), status: "scheduled", scheduledFor: scheduledFor.toISOString() });
     },
     async cancel(id) {
       const post = posts.get(id);
@@ -132,14 +149,7 @@ export function createMemoryPostRepository(): PostRepository {
       if (!post) return undefined;
       if (!schedulable.has(post.status)) return { claimed: false, post };
       // Claimed synchronously, before the first await, so a concurrent request sees "publishing" and is refused.
-      const claimed = put({
-        ...post,
-        ...(changes?.text !== undefined ? { text: changes.text } : {}),
-        ...(changes?.media !== undefined ? { media: changes.media } : {}),
-        ...(changes?.platforms !== undefined ? { platforms: changes.platforms } : {}),
-        status: "publishing",
-        scheduledFor: new Date().toISOString(),
-      });
+      const claimed = put({ ...withChanges(post, changes), status: "publishing", scheduledFor: new Date().toISOString() });
       const attempts = new Map((claimed.attempts ?? []).map((attempt) => [attempt.platform, attempt]));
       const results: PlatformOutcome[] = [];
       const errors = claimed.platforms.length ? [] : ["no target platforms — the post cannot be published"];
@@ -187,33 +197,38 @@ export async function createPrismaPostRepository(options: { prisma?: PrismaClien
   const { publishClaimedPost } = await import("./publishing.js");
   const prisma = options.prisma ?? getPrismaClient();
 
-  const toPost = (row: PostRow): StoredPost => ({
-    id: row.id,
-    text: row.content,
-    media: Array.isArray(row.mediaUrls) ? (row.mediaUrls as unknown as MediaAttachment[]) : [],
-    platforms: row.platforms.map((platform) => toPlatformId(platform)),
-    status: toStatus(row.status),
-    scheduledFor: row.scheduledFor?.toISOString(),
-    nextAttemptAt: row.nextAttemptAt?.toISOString(),
-    createdAt: row.createdAt.toISOString(),
-    ...(row.lastError ? { lastError: row.lastError } : {}),
-    ...(row.attempts?.length
-      ? {
-          attempts: row.attempts.map((attempt) => ({
-            platform: toPlatformId(attempt.platform),
-            status: attempt.status.toLowerCase(),
-            ...(attempt.externalPostId ? { externalPostId: attempt.externalPostId } : {}),
-            ...(attempt.error ? { error: attempt.error } : {}),
-          })),
-        }
-      : {}),
-  });
+  const toPost = (row: PostRow): StoredPost => {
+    const platformOverrides = storedOverrides(row.platformOverrides);
+    return {
+      id: row.id,
+      text: row.content,
+      media: Array.isArray(row.mediaUrls) ? (row.mediaUrls as unknown as MediaAttachment[]) : [],
+      platforms: row.platforms.map((platform) => toPlatformId(platform)),
+      ...(hasOverrides(platformOverrides) ? { platformOverrides } : {}),
+      status: toStatus(row.status),
+      scheduledFor: row.scheduledFor?.toISOString(),
+      nextAttemptAt: row.nextAttemptAt?.toISOString(),
+      createdAt: row.createdAt.toISOString(),
+      ...(row.lastError ? { lastError: row.lastError } : {}),
+      ...(row.attempts?.length
+        ? {
+            attempts: row.attempts.map((attempt) => ({
+              platform: toPlatformId(attempt.platform),
+              status: attempt.status.toLowerCase(),
+              ...(attempt.externalPostId ? { externalPostId: attempt.externalPostId } : {}),
+              ...(attempt.error ? { error: attempt.error } : {}),
+            })),
+          }
+        : {}),
+    };
+  };
 
   const find = async (id: string) => prisma.post.findUnique({ where: { id }, include: { attempts: true } });
   const contentChanges = (changes?: Partial<PostInput>) => ({
     ...(changes?.text !== undefined ? { content: changes.text } : {}),
     ...(changes?.media !== undefined ? { mediaUrls: changes.media as unknown as object } : {}),
     ...(changes?.platforms !== undefined ? { platforms: changes.platforms.map(toPlatformEnum) } : {}),
+    ...(changes?.platformOverrides !== undefined ? { platformOverrides: changes.platformOverrides as object } : {}),
   });
 
   return {
@@ -235,6 +250,7 @@ export async function createPrismaPostRepository(options: { prisma?: PrismaClien
           content: input.text,
           mediaUrls: (input.media ?? []) as unknown as object,
           platforms: (input.platforms ?? []).map(toPlatformEnum),
+          ...(hasOverrides(input.platformOverrides) ? { platformOverrides: input.platformOverrides as object } : {}),
           status: input.scheduledFor ? "SCHEDULED" : "DRAFT",
           scheduledFor: input.scheduledFor ?? null,
         },
@@ -317,7 +333,7 @@ export async function createPrismaPostRepository(options: { prisma?: PrismaClien
 }
 
 export async function createPostRepository(): Promise<PostRepository> {
-  if (process.env.DATABASE_URL) return createPrismaPostRepository();
+  if (stringEnv(process.env, "DATABASE_URL")) return createPrismaPostRepository();
   if (process.env.MOCK_MODE !== "true") {
     console.warn("DATABASE_URL is not set — drafts and scheduled posts will only live in memory and are never published by the worker");
   }

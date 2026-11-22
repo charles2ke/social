@@ -18,7 +18,7 @@ export function isHttpUrl(url: string): boolean {
   try { return ["http:", "https:"].includes(new URL(url).protocol); } catch { return false; }
 }
 
-/** Return an http(s)-only src for previews so a hostile URL can never become `javascript:` or `data:`. */
-export function safeMediaSrc(url: string): string {
+/** Return an http(s)-only URL (or "") for a src or href, so a hostile URL can never become `javascript:` or `data:`. */
+export function safeUrl(url: string): string {
   try { const parsed = new URL(url); return ["http:", "https:"].includes(parsed.protocol) ? parsed.href : ""; } catch { return ""; }
 }

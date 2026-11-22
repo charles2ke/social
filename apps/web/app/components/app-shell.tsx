@@ -3,6 +3,7 @@ import Link from "next/link";
 import { useSelectedLayoutSegments } from "next/navigation";
 import { useState } from "react";
 import { HomeIcon, ListIcon, MenuIcon, SetupIcon } from "../icons";
+import { SessionGate, useSession } from "./session-gate";
 import { ThemeToggle } from "./theme";
 
 const links = [
@@ -11,11 +12,13 @@ const links = [
   { href: "/setup", segment: "setup", label: "Setup", description: "Connect platforms", Icon: SetupIcon },
 ];
 
-/** Sticky top bar plus a sidebar that collapses into a disclosure on small screens. */
+/** Sticky top bar plus a sidebar that collapses into a disclosure on small screens; pages render behind the sign-in gate. */
 export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) {
   const segments = useSelectedLayoutSegments();
   const [open, setOpen] = useState(false);
   const current = segments[0] ?? null;
+  const session = useSession();
+  const { state } = session;
 
   const nav = (
     <nav className="flex flex-col gap-1" aria-label="Primary">
@@ -61,7 +64,17 @@ export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) 
             <span className="text-base font-semibold tracking-tight">Social</span>
           </Link>
           <span className="badge hidden sm:inline-flex">Self-hosted</span>
-          <div className="ml-auto">
+          <div className="ml-auto flex items-center gap-2">
+            {state.kind === "signed-in" ? (
+              <button
+                type="button"
+                className="btn-ghost px-3 py-1.5 text-xs"
+                title={state.expiresAt ? `Your session ends ${new Date(state.expiresAt).toLocaleString()}` : undefined}
+                onClick={() => void session.signOut()}
+              >
+                Sign out
+              </button>
+            ) : null}
             <ThemeToggle />
           </div>
         </div>
@@ -75,7 +88,7 @@ export function AppShell({ children }: Readonly<{ children: React.ReactNode }>) 
           <div id="primary-nav" className={`mb-6 card p-3 md:hidden ${open ? "" : "hidden"}`}>
             {nav}
           </div>
-          {children}
+          <SessionGate session={session}>{children}</SessionGate>
         </div>
       </div>
     </div>

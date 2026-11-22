@@ -5,7 +5,10 @@ export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>
 
 export const defaultFetch: FetchLike = (input, init) => fetch(input, init);
 
-const SECRET_KEYS = ["access_token", "refresh_token", "client_secret", "code", "authorization"];
+const SECRET_KEYS = [
+  "access_token", "accessToken", "refresh_token", "refreshToken", "id_token", "idToken",
+  "client_secret", "clientSecret", "api_key", "apiKey", "token", "password", "secret", "code", "authorization",
+];
 
 /**
  * Platform responses (and our own request bodies) routinely contain tokens.
@@ -18,7 +21,7 @@ export function redactSecrets(value: string): string {
     result = result.replace(new RegExp(`("${key}"\\s*:\\s*")[^"]*(")`, "gi"), "$1[redacted]$2");
     result = result.replace(new RegExp(`(\\b${key}=)[^&\\s]+`, "gi"), "$1[redacted]");
   }
-  return result;
+  return result.replace(/\b(Bearer|Basic)\s+[\w\-.~+/]+=*/gi, "$1 [redacted]");
 }
 
 export class PlatformApiError extends Error {

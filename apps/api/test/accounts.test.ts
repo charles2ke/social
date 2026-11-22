@@ -12,6 +12,17 @@ describe("account repository", () => {
     expect((await repository.readToken(account.id))?.externalId).toBe("acct-1");
     expect(await repository.list()).toHaveLength(1);
   });
+
+  it("disconnects an account, after which a token refresh cannot bring it back", async () => {
+    const repository = createMemoryAccountRepository();
+    const account = await repository.connect("linkedin", profile, { accessToken: "at" });
+    expect(await repository.disconnect(account.id)).toEqual(account);
+    await repository.writeToken(account.id, { accessToken: "refreshed" });
+    expect(await repository.list()).toEqual([]);
+    expect(await repository.findByPlatform("linkedin")).toBeUndefined();
+    expect(await repository.readToken(account.id)).toBeUndefined();
+    expect(await repository.disconnect(account.id)).toBeUndefined();
+  });
 });
 
 describe("authorizedToken", () => {

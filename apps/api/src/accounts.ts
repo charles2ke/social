@@ -1,4 +1,5 @@
 import { decrypt, encrypt, isExpired, type PlatformId, type Profile, type TokenSet } from "@social/core";
+import { stringEnv } from "./env.js";
 
 export type ConnectedAccount = {
   id: string;
@@ -13,7 +14,10 @@ export interface AccountRepository {
   findByPlatform(platform: PlatformId): Promise<ConnectedAccount | undefined>;
   connect(platform: PlatformId, profile: Profile, token: TokenSet): Promise<ConnectedAccount>;
   readToken(accountId: string): Promise<TokenSet | undefined>;
+  /** Replaces the tokens of a still-connected account (after a refresh); a no-op once it was disconnected. */
   writeToken(accountId: string, token: TokenSet): Promise<void>;
+  /** Deletes the account's stored tokens; returns the account, or undefined when it is not connected. */
+  disconnect(accountId: string): Promise<ConnectedAccount | undefined>;
 }
 
 /** Used when no DATABASE_URL is configured (e.g. the mock-mode demo). */
@@ -44,14 +48,22 @@ export function createMemoryAccountRepository(): AccountRepository {
       return tokens.get(accountId);
     },
     async writeToken(accountId, token) {
-      tokens.set(accountId, token);
       const account = accounts.get(accountId);
-      if (account) accounts.set(accountId, { ...account, tokenExpiresAt: token.expiresAt?.toISOString() });
+      if (!account) return;
+      tokens.set(accountId, token);
+      accounts.set(accountId, { ...account, tokenExpiresAt: token.expiresAt?.toISOString() });
+    },
+    async disconnect(accountId) {
+      const account = accounts.get(accountId);
+      accounts.delete(accountId);
+      tokens.delete(accountId);
+      return account;
     },
   };
 }
 
 type PrismaModule = typeof import("@social/db");
+type PrismaClient = ReturnType<PrismaModule["getPrismaClient"]>;
 
 const toEnum = (platform: PlatformId) => platform.toUpperCase() as Uppercase<PlatformId>;
 const toPlatformId = (value: string) => value.toLowerCase() as PlatformId;
@@ -60,10 +72,15 @@ const toPlatformId = (value: string) => value.toLowerCase() as PlatformId;
  * Postgres-backed accounts. Access and refresh tokens are AES-256-GCM
  * encrypted by the application layer before they are written, so the database
  * never stores plaintext credentials (see docs/adr/0001-database.md).
+ *
+ * Disconnecting deletes the tokens but keeps the account row, because publish
+ * attempts reference it: deleting it would cascade away the per-platform
+ * publish history that stops a retry from posting twice. An account counts
+ * as connected while it has tokens; reconnecting it restores them.
  */
-export async function createPrismaAccountRepository(): Promise<AccountRepository> {
+export async function createPrismaAccountRepository(options: { prisma?: PrismaClient } = {}): Promise<AccountRepository> {
   const { getPrismaClient }: PrismaModule = await import("@social/db");
-  const prisma = getPrismaClient();
+  const prisma = options.prisma ?? getPrismaClient();
 
   const toAccount = (row: { id: string; platform: string; displayName: string; externalId: string; token?: { expiresAt: Date | null } | null }): ConnectedAccount => ({
     id: row.id,
@@ -73,14 +90,16 @@ export async function createPrismaAccountRepository(): Promise<AccountRepository
     tokenExpiresAt: row.token?.expiresAt?.toISOString(),
   });
 
+  const connected = { token: { isNot: null } };
+
   return {
     async list() {
-      const rows = await prisma.account.findMany({ include: { token: true }, orderBy: { createdAt: "asc" } });
+      const rows = await prisma.account.findMany({ where: connected, include: { token: true }, orderBy: { createdAt: "asc" } });
       return rows.map(toAccount);
     },
     async findByPlatform(platform) {
       const row = await prisma.account.findFirst({
-        where: { platform: toEnum(platform) },
+        where: { platform: toEnum(platform), ...connected },
         include: { token: true },
         orderBy: { createdAt: "asc" },
       });
@@ -124,17 +143,23 @@ export async function createPrismaAccountRepository(): Promise<AccountRepository
         encryptedRefreshToken: token.refreshToken ? encrypt(token.refreshToken) : null,
         expiresAt: token.expiresAt ?? null,
       };
-      // A refresh only ever rewrites an existing row, so it is issued as a
-      // plain UPDATE: that is all the least-privilege scheduler worker role is
-      // granted on oauth_tokens (see prisma/init/01-social-worker-role.sql).
-      const { count } = await prisma.oAuthToken.updateMany({ where: { accountId }, data: encrypted });
-      if (!count) await prisma.oAuthToken.create({ data: { accountId, ...encrypted } });
+      // Only ever an UPDATE of an existing row: that is all the least-privilege
+      // worker role may do on oauth_tokens (see the social_worker_grants
+      // migration), and a refresh racing a disconnect must not bring the
+      // deleted tokens back.
+      await prisma.oAuthToken.updateMany({ where: { accountId }, data: encrypted });
+    },
+    async disconnect(accountId) {
+      const row = await prisma.account.findFirst({ where: { id: accountId, ...connected } });
+      if (!row) return undefined;
+      const { count } = await prisma.oAuthToken.deleteMany({ where: { accountId } });
+      return count ? toAccount({ ...row, token: null }) : undefined;
     },
   };
 }
 
 export async function createAccountRepository(): Promise<AccountRepository> {
-  if (process.env.DATABASE_URL) return createPrismaAccountRepository();
+  if (stringEnv(process.env, "DATABASE_URL")) return createPrismaAccountRepository();
   if (process.env.MOCK_MODE !== "true") {
     console.warn("DATABASE_URL is not set — connected accounts and tokens will only live in memory");
   }

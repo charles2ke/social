@@ -1,10 +1,10 @@
 import { defineConfig, devices } from "@playwright/test";
-import { apiOrigin, apiPort, docsScreenshots, webOrigin, webPort } from "./e2e/servers";
+import { adminToken, apiOrigin, apiPort, docsScreenshots, webOrigin, webPort } from "./e2e/servers";
 
 /**
  * End-to-end tests drive the production build of the dashboard against the
  * API in mock mode with in-memory storage, so they need neither a database
- * nor platform credentials.
+ * nor platform credentials. The API requires sign-in, as it does in production.
  */
 
 // README screenshots must come from a fresh mock API and production build, never a running dev server.
@@ -26,7 +26,16 @@ export default defineConfig({
       command: "pnpm --filter @social/core run build && pnpm --filter @social/api exec tsx src/index.ts",
       url: `${apiOrigin}/health`,
       // Blank values override anything inherited from the shell, keeping the API in mock + memory mode.
-      env: { MOCK_MODE: "true", API_PORT: String(apiPort), WEB_ORIGIN: webOrigin, DATABASE_URL: "", ADMIN_TOKEN: "" },
+      env: {
+        MOCK_MODE: "true",
+        API_HOST: "localhost",
+        API_PORT: String(apiPort),
+        WEB_ORIGIN: webOrigin,
+        BASE_URL: webOrigin,
+        DATABASE_URL: "",
+        ADMIN_TOKEN: adminToken,
+        OAUTH_STATE_SECRET: "",
+      },
       reuseExistingServer,
       timeout: 120_000,
     },

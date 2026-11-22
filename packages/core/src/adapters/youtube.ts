@@ -4,17 +4,21 @@ import type { PlatformSpec } from "./base.js";
 const API = "https://www.googleapis.com/youtube/v3";
 const UPLOAD = "https://www.googleapis.com/upload/youtube/v3/videos";
 
+/** Default cap on a video downloaded for upload; `MEDIA_MAX_DOWNLOAD_BYTES` overrides it. */
+const DEFAULT_MAX_VIDEO_BYTES = 256 * 1024 * 1024;
+const uploadableType = /^(video\/|application\/octet-stream|binary\/octet-stream)/i;
+
 /**
  * YouTube uploads are binary, so they bypass the JSON helper and call `fetch` directly.
- * The video is buffered fully into memory before being sent, so a large source
- * video can exhaust the process's heap — keep uploads modest until this is
- * switched to a streaming body.
+ * The video is downloaded into memory (public addresses only, capped at
+ * `MEDIA_MAX_DOWNLOAD_BYTES`) before being sent.
  */
 export const youtubeSpec: PlatformSpec = {
   id: "youtube",
   capabilities: { text: true, image: false, video: true, schedule: true, analytics: true },
   // videos.insert uploads exactly one video; thumbnails are set separately.
   mediaConstraints: { maxAttachments: 1, allowsMixedKinds: false, requiresKind: "video" },
+  textConstraints: { titleMaxLength: 100, maxLength: 5000 },
   oauth: {
     authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth",
     tokenUrl: "https://oauth2.googleapis.com/token",
@@ -36,6 +40,11 @@ export const youtubeSpec: PlatformSpec = {
   async publish(ctx, post) {
     const source = post.media[0]?.url;
     if (!source) throw new Error("YouTube requires a video URL to upload");
+    const maxBytes = Number.parseInt(ctx.env.MEDIA_MAX_DOWNLOAD_BYTES ?? "", 10);
+    const file = await ctx.download(source, { maxBytes: maxBytes > 0 ? maxBytes : DEFAULT_MAX_VIDEO_BYTES });
+    if (file.contentType && !uploadableType.test(file.contentType)) {
+      throw new Error(`The media to upload is not a video (content-type ${file.contentType.slice(0, 100)})`);
+    }
     const authorization = ["Bearer", ctx.token.accessToken].join(" ");
     const [title, ...rest] = post.text.split("\n");
     const start = await ctx.fetch(`${UPLOAD}?uploadType=resumable&part=snippet,status`, {
@@ -50,13 +59,10 @@ export const youtubeSpec: PlatformSpec = {
     const session = start.headers.get("location");
     if (!session) throw new Error("YouTube did not return a resumable upload session");
 
-    const media = await ctx.fetch(source);
-    if (!media.ok) throw new Error(`Could not download the video to upload (status ${media.status})`);
-    const bytes = new Uint8Array(await media.arrayBuffer());
     const upload = await ctx.fetch(session, {
       method: "PUT",
-      headers: { Authorization: authorization, "Content-Type": media.headers.get("content-type") ?? "video/*" },
-      body: bytes,
+      headers: { Authorization: authorization, "Content-Type": file.contentType ?? "video/*" },
+      body: file.bytes,
     });
     const body = await upload.text();
     if (!upload.ok) throw new PlatformApiError("youtube", upload.status, body);

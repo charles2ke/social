@@ -6,6 +6,7 @@ const API = "https://www.strava.com/api/v3";
 export const stravaSpec: PlatformSpec = {
   id: "strava",
   capabilities: { text: true, image: false, video: false, schedule: true, analytics: false },
+  textConstraints: { titleMaxLength: 255 },
   oauth: {
     authorizeUrl: "https://www.strava.com/oauth/authorize",
     tokenUrl: "https://www.strava.com/oauth/token",

@@ -2,10 +2,10 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { FormEvent, KeyboardEvent, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { apiUrl } from "./config";
-import { AlertIcon, CheckIcon, ClockIcon, LinkIcon, PlatformIcon, PlusIcon, TrashIcon } from "./icons";
+import { AlertIcon, CheckIcon, ClockIcon, LinkIcon, PencilIcon, PlatformIcon, PlusIcon, TrashIcon } from "./icons";
 import { platformIds, platformMeta, publishablePlatformIds } from "./platforms";
-import { inferMediaKind, isHttpUrl, safeMediaSrc, type MediaAttachment } from "./media";
+import { inferMediaKind, isHttpUrl, safeUrl, type MediaAttachment } from "./media";
+import { isOverLimit, textUsage, type TextConstraints, type TextUsage } from "./text";
 import {
   ApiError,
   callApi,
@@ -20,6 +20,7 @@ import { StatusBadge } from "./components/post-status";
 import { StorageNotice, useStorageMode } from "./components/storage-notice";
 
 type Compatibility = { platform: string; compatible: boolean; reason?: string };
+type PlatformInfo = { id: string; textConstraints?: TextConstraints };
 /** `postsLink` appends a link to the Posts page, where the saved post can be found. */
 type Status = { message: string; tone: "info" | "warning" | "error" | "success"; postsLink?: boolean };
 type Action = "loading" | "saving" | "publishing" | "scheduling";
@@ -36,6 +37,14 @@ const editingHints: Partial<Record<PostStatus, string>> = {
 function toLocalInputValue(date: Date): string {
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
   return local.toISOString().slice(0, 16);
+}
+
+const describeUsage = ({ part, used, limit }: TextUsage) =>
+  `${part === "post" ? "" : `${part} `}${used.toLocaleString()}/${limit.toLocaleString()}`;
+
+/** The overrides worth sending: one per selected platform with non-blank text. */
+function chosenOverrides(overrides: Record<string, string>, platforms: string[]): Record<string, { text: string }> {
+  return Object.fromEntries(platforms.flatMap((platform) => (overrides[platform]?.trim() ? [[platform, { text: overrides[platform] }]] : [])));
 }
 
 /**
@@ -60,6 +69,10 @@ export default function Dashboard() {
   const currentId = useRef<string | undefined>(undefined);
   const session = useRef(0);
   const [text, setText] = useState("");
+  /** Text that replaces `text` on one platform, keyed by platform id. */
+  const [overrides, setOverrides] = useState<Record<string, string>>({});
+  /** Text limits per platform, from the API; empty while unknown (e.g. the API is unreachable). */
+  const [limits, setLimits] = useState<Record<string, TextConstraints>>({});
   const [selected, setSelected] = useState(defaultPlatforms);
   const [media, setMedia] = useState<MediaAttachment[]>([]);
   const [mediaUrl, setMediaUrl] = useState("");
@@ -75,15 +88,19 @@ export default function Dashboard() {
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch(`${apiUrl}/media/validate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: "", media }),
-      signal: controller.signal,
-    })
-      .then((response) => (response.ok ? response.json() : []))
+    callApi<PlatformInfo[]>("/platforms", { signal: controller.signal })
+      .then((list) =>
+        setLimits(Object.fromEntries(list.flatMap(({ id, textConstraints }) => (textConstraints ? [[id, textConstraints] as const] : [])))),
+      )
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    callApi<Compatibility[]>("/media/validate", { body: { text: "", media }, signal: controller.signal })
       // Warn only about the platforms the user actually publishes to; an empty list can still be incompatible (e.g. media-required platforms).
-      .then((result: Compatibility[]) =>
+      .then((result) =>
         setWarnings(Array.isArray(result) ? result.filter((item) => !item.compatible && selected.includes(item.platform)) : []),
       )
       .catch(() => setWarnings([]));
@@ -119,7 +136,7 @@ export default function Dashboard() {
   );
 
   const resetForm = useCallback(() => {
-    setText(""); setMedia([]); setMediaUrl(""); setAltText(""); setSelected(defaultPlatforms);
+    setText(""); setOverrides({}); setMedia([]); setMediaUrl(""); setAltText(""); setSelected(defaultPlatforms);
     setLater(false); setScheduledFor(""); setResults([]); setStatus(undefined);
   }, []);
 
@@ -132,6 +149,13 @@ export default function Dashboard() {
         const stored = await callApi<StoredPost>(`/posts/${encodeURIComponent(id)}`);
         if (session.current !== activeSession) return;
         setText(stored.text); setMedia(stored.media);
+        setOverrides(
+          Object.fromEntries(
+            Object.entries(stored.platformOverrides ?? {}).flatMap(([platform, override]) =>
+              typeof override?.text === "string" ? [[platform, override.text] as const] : [],
+            ),
+          ),
+        );
         setSelected(stored.platforms.filter((platform) => publishablePlatformIds.includes(platform)));
         const scheduled = stored.status === "scheduled" && stored.scheduledFor ? new Date(stored.scheduledFor) : undefined;
         setLater(Boolean(scheduled)); setScheduledFor(scheduled ? toLocalInputValue(scheduled) : "");
@@ -182,7 +206,7 @@ export default function Dashboard() {
     const activeSession = session.current;
     setBusy("saving"); setResults([]); setStatus({ message: "Saving…", tone: "info" });
     try {
-      const content = { text, media, platforms: selected };
+      const content = { text, media, platforms: selected, platformOverrides: chosenOverrides(overrides, selected) };
       const saved = post
         ? await callApi<StoredPost>(`/drafts/${encodeURIComponent(post.id)}`, { body: content })
         : await callApi<StoredPost>("/drafts", { body: content });
@@ -197,6 +221,11 @@ export default function Dashboard() {
     event.preventDefault();
     if (busy) return;
     if (selected.length === 0) { setStatus({ message: "Choose at least one platform to publish to", tone: "error" }); return; }
+    if (tooLong.length > 0) {
+      const names = tooLong.map((platform) => platformMeta(platform).label).join(", ");
+      setStatus({ message: `The text is too long for ${names}. Shorten it, or customize the text for ${tooLong.length === 1 ? "that platform" : "those platforms"}.`, tone: "error" });
+      return;
+    }
 
     let when: Date | undefined;
     if (later) {
@@ -207,7 +236,7 @@ export default function Dashboard() {
 
     const activeSession = session.current;
     setBusy(when ? "scheduling" : "publishing"); setResults([]); setStatus({ message: when ? "Scheduling…" : "Publishing…", tone: "info" });
-    const content = { text, media, platforms: selected };
+    const content = { text, media, platforms: selected, platformOverrides: chosenOverrides(overrides, selected) };
     try {
       if (when) {
         const scheduled = await callApi<StoredPost>("/schedule", {
@@ -248,6 +277,13 @@ export default function Dashboard() {
     finally { if (session.current === activeSession) setBusy(undefined); }
   };
 
+  const effectiveText = (platform: string) => (overrides[platform]?.trim() ? overrides[platform] : text);
+  // Platforms without a known limit (or before /platforms answers) get no counter.
+  const usages = selected
+    .map((platform) => ({ platform, custom: Boolean(overrides[platform]?.trim()), usage: textUsage(limits[platform], effectiveText(platform)) }))
+    .filter(({ usage }) => usage.length > 0);
+  const tooLong = usages.filter(({ usage }) => isOverLimit(usage)).map(({ platform }) => platform);
+
   const primaryLabel =
     busy === "scheduling" ? "Scheduling…" : busy === "publishing" ? "Publishing…" : later ? (post?.status === "scheduled" ? "Update schedule" : "Schedule post") : "Publish now";
 
@@ -287,17 +323,87 @@ export default function Dashboard() {
         <section className="card space-y-3">
           <div className="flex items-baseline justify-between">
             <h2 className="text-lg font-semibold">Post</h2>
-            <span className={`text-xs ${text.length > 2900 ? "text-amber-500" : "text-ink-muted"}`}>{text.length}/3000</span>
+            <span className="text-xs text-ink-muted">{text.length.toLocaleString()} characters</span>
           </div>
           <textarea
             aria-label="Post text"
             value={text}
             onChange={(event) => setText(event.target.value)}
-            maxLength={3000}
             placeholder="Share an update…"
             required
             className="field min-h-40 resize-y leading-relaxed"
           />
+          {usages.length > 0 ? (
+            <ul className="flex flex-wrap gap-2" aria-label="Character limits">
+              {usages.map(({ platform, custom, usage }) => {
+                const over = isOverLimit(usage);
+                return (
+                  <li
+                    key={platform}
+                    className={`badge tabular-nums ${over ? "border-rose-500/50 bg-rose-500/10 text-rose-600 dark:text-rose-300" : ""}`}
+                    title={over ? `Too long for ${platformMeta(platform).label}` : undefined}
+                  >
+                    <PlatformIcon platform={platform} width={12} height={12} />
+                    {platformMeta(platform).label}
+                    {custom ? " (custom)" : ""}: {usage.map(describeUsage).join(" · ")}
+                    {over ? <span className="sr-only"> — too long</span> : null}
+                  </li>
+                );
+              })}
+            </ul>
+          ) : null}
+          {selected.length > 0 ? (
+            <div className="space-y-3 border-t border-edge pt-3" role="group" aria-label="Customize per platform">
+              <p className="text-sm">
+                <span className="font-medium">Customize per platform</span>{" "}
+                <span className="text-ink-muted">— optional text that replaces the post above on one platform.</span>
+              </p>
+              {selected
+                .filter((platform) => overrides[platform] !== undefined)
+                .map((platform) => {
+                  const label = platformMeta(platform).label;
+                  return (
+                    <div key={platform} className="space-y-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <label htmlFor={`override-${platform}`} className="flex items-center gap-2 text-sm font-medium">
+                          <PlatformIcon platform={platform} width={14} height={14} className="text-ink-muted" />
+                          {label} text
+                        </label>
+                        <button
+                          type="button"
+                          className="btn-ghost px-2 py-1 text-xs"
+                          onClick={() => setOverrides((current) => Object.fromEntries(Object.entries(current).filter(([id]) => id !== platform)))}
+                        >
+                          <TrashIcon width={12} height={12} /> Use the main text
+                        </button>
+                      </div>
+                      <textarea
+                        id={`override-${platform}`}
+                        value={overrides[platform]}
+                        onChange={(event) => setOverrides((current) => ({ ...current, [platform]: event.target.value }))}
+                        placeholder={`Leave empty to post the main text on ${label}`}
+                        className="field min-h-24 resize-y leading-relaxed"
+                      />
+                    </div>
+                  );
+                })}
+              <div className="flex flex-wrap gap-2">
+                {selected
+                  .filter((platform) => overrides[platform] === undefined)
+                  .map((platform) => (
+                    <button
+                      key={platform}
+                      type="button"
+                      className="btn-ghost px-3 py-1.5 text-xs"
+                      // Starts from the main text, which is usually the thing to trim.
+                      onClick={() => setOverrides((current) => ({ ...current, [platform]: text }))}
+                    >
+                      <PencilIcon width={14} height={14} /> Customize {platformMeta(platform).label}
+                    </button>
+                  ))}
+              </div>
+            </div>
+          ) : null}
         </section>
 
         <section className="card space-y-4">
@@ -338,9 +444,9 @@ export default function Dashboard() {
               {media.map((item) => (
                 <li key={item.url} className="flex items-center gap-3 rounded-xl border border-edge bg-surface-muted p-3">
                   {item.kind === "image" ? (
-                    <img src={safeMediaSrc(item.url)} alt={item.altText ?? ""} className="h-16 w-16 rounded-lg object-cover" />
+                    <img src={safeUrl(item.url)} alt={item.altText ?? ""} className="h-16 w-16 rounded-lg object-cover" />
                   ) : (
-                    <video src={safeMediaSrc(item.url)} controls aria-label={item.altText ?? item.url} className="h-16 w-16 rounded-lg object-cover" />
+                    <video src={safeUrl(item.url)} controls aria-label={item.altText ?? item.url} className="h-16 w-16 rounded-lg object-cover" />
                   )}
                   <div className="min-w-0 flex-1">
                     <span className="badge">{item.kind}</span>
@@ -500,8 +606,8 @@ export default function Dashboard() {
                 {result.status === "published" ? (
                   <span className="ml-auto flex items-center gap-2 text-emerald-500">
                     <CheckIcon width={16} height={16} /> published
-                    {result.url ? (
-                      <a href={result.url} className="flex items-center gap-1 text-brand hover:underline">
+                    {result.url && safeUrl(result.url) ? (
+                      <a href={safeUrl(result.url)} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-brand hover:underline">
                         <LinkIcon width={14} height={14} /> view
                       </a>
                     ) : null}

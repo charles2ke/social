@@ -8,6 +8,7 @@ export const linkedinSpec: PlatformSpec = {
   capabilities: { text: true, image: true, video: true, schedule: true, analytics: true },
   // LinkedIn posts carry up to 9 images or a single video, never both.
   mediaConstraints: { maxAttachments: 9, allowsMixedKinds: false },
+  textConstraints: { maxLength: 3000 },
   oauth: {
     authorizeUrl: "https://www.linkedin.com/oauth/v2/authorization",
     tokenUrl: "https://www.linkedin.com/oauth/v2/accessToken",
