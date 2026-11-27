@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { decrypt, encrypt, isExpired, type PlatformId, type Profile, type TokenSet } from "@social/core";
 import { stringEnv } from "./env.js";
 
@@ -9,13 +10,15 @@ export type ConnectedAccount = {
   tokenExpiresAt?: string;
 };
 
+type StoredToken = { token: TokenSet; revision: string };
+
 export interface AccountRepository {
   list(): Promise<ConnectedAccount[]>;
   findByPlatform(platform: PlatformId): Promise<ConnectedAccount | undefined>;
   connect(platform: PlatformId, profile: Profile, token: TokenSet): Promise<ConnectedAccount>;
-  readToken(accountId: string): Promise<TokenSet | undefined>;
-  /** Replaces the tokens of a still-connected account (after a refresh); a no-op once it was disconnected. */
-  writeToken(accountId: string, token: TokenSet): Promise<void>;
+  readToken(accountId: string): Promise<StoredToken | undefined>;
+  /** Replaces tokens only if the connection has not changed since they were read. */
+  writeToken(accountId: string, token: TokenSet, revision: string): Promise<void>;
   /** Deletes the account's stored tokens; returns the account, or undefined when it is not connected. */
   disconnect(accountId: string): Promise<ConnectedAccount | undefined>;
 }
@@ -23,7 +26,7 @@ export interface AccountRepository {
 /** Used when no DATABASE_URL is configured (e.g. the mock-mode demo). */
 export function createMemoryAccountRepository(): AccountRepository {
   const accounts = new Map<string, ConnectedAccount>();
-  const tokens = new Map<string, TokenSet>();
+  const tokens = new Map<string, StoredToken>();
   return {
     async list() {
       return [...accounts.values()];
@@ -41,16 +44,16 @@ export function createMemoryAccountRepository(): AccountRepository {
         tokenExpiresAt: token.expiresAt?.toISOString(),
       };
       accounts.set(id, account);
-      tokens.set(id, { ...token, externalId: token.externalId ?? profile.id });
+      tokens.set(id, { token: { ...token, externalId: token.externalId ?? profile.id }, revision: randomUUID() });
       return account;
     },
     async readToken(accountId) {
       return tokens.get(accountId);
     },
-    async writeToken(accountId, token) {
+    async writeToken(accountId, token, revision) {
       const account = accounts.get(accountId);
-      if (!account) return;
-      tokens.set(accountId, token);
+      if (!account || tokens.get(accountId)?.revision !== revision) return;
+      tokens.set(accountId, { token, revision: randomUUID() });
       accounts.set(accountId, { ...account, tokenExpiresAt: token.expiresAt?.toISOString() });
     },
     async disconnect(accountId) {
@@ -131,13 +134,16 @@ export async function createPrismaAccountRepository(options: { prisma?: PrismaCl
       const row = await prisma.oAuthToken.findUnique({ where: { accountId }, include: { account: true } });
       if (!row) return undefined;
       return {
-        accessToken: decrypt(row.encryptedAccessToken),
-        refreshToken: row.encryptedRefreshToken ? decrypt(row.encryptedRefreshToken) : undefined,
-        expiresAt: row.expiresAt ?? undefined,
-        externalId: row.account.externalId,
+        token: {
+          accessToken: decrypt(row.encryptedAccessToken),
+          refreshToken: row.encryptedRefreshToken ? decrypt(row.encryptedRefreshToken) : undefined,
+          expiresAt: row.expiresAt ?? undefined,
+          externalId: row.account.externalId,
+        },
+        revision: row.encryptedAccessToken,
       };
     },
-    async writeToken(accountId, token) {
+    async writeToken(accountId, token, revision) {
       const encrypted = {
         encryptedAccessToken: encrypt(token.accessToken),
         encryptedRefreshToken: token.refreshToken ? encrypt(token.refreshToken) : null,
@@ -145,9 +151,9 @@ export async function createPrismaAccountRepository(options: { prisma?: PrismaCl
       };
       // Only ever an UPDATE of an existing row: that is all the least-privilege
       // worker role may do on oauth_tokens (see the social_worker_grants
-      // migration), and a refresh racing a disconnect must not bring the
-      // deleted tokens back.
-      await prisma.oAuthToken.updateMany({ where: { accountId }, data: encrypted });
+      // migration). The ciphertext changes on every connect or refresh, so it
+      // also guards against a disconnect/reconnect or a competing refresh.
+      await prisma.oAuthToken.updateMany({ where: { accountId, encryptedAccessToken: revision }, data: encrypted });
     },
     async disconnect(accountId) {
       const row = await prisma.account.findFirst({ where: { id: accountId, ...connected } });
@@ -175,12 +181,13 @@ export async function authorizedToken(
   account: ConnectedAccount,
   refresh: (token: TokenSet) => Promise<TokenSet>,
 ): Promise<TokenSet> {
-  const token = await repository.readToken(account.id);
-  if (!token) throw new Error(`No stored token for the connected ${account.platform} account`);
+  const stored = await repository.readToken(account.id);
+  if (!stored) throw new Error(`No stored token for the connected ${account.platform} account`);
+  const { token, revision } = stored;
   if (!isExpired(token)) return token;
   const refreshed = await refresh(token);
   if (refreshed.accessToken !== token.accessToken || refreshed.expiresAt !== token.expiresAt) {
-    await repository.writeToken(account.id, refreshed);
+    await repository.writeToken(account.id, refreshed, revision);
   }
   return refreshed;
 }

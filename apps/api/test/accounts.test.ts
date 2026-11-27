@@ -9,15 +9,16 @@ describe("account repository", () => {
     const repository = createMemoryAccountRepository();
     const account = await repository.connect("linkedin", profile, { accessToken: "at" });
     expect(await repository.findByPlatform("linkedin")).toEqual(account);
-    expect((await repository.readToken(account.id))?.externalId).toBe("acct-1");
+    expect((await repository.readToken(account.id))?.token.externalId).toBe("acct-1");
     expect(await repository.list()).toHaveLength(1);
   });
 
   it("disconnects an account, after which a token refresh cannot bring it back", async () => {
     const repository = createMemoryAccountRepository();
     const account = await repository.connect("linkedin", profile, { accessToken: "at" });
+    const stored = await repository.readToken(account.id);
     expect(await repository.disconnect(account.id)).toEqual(account);
-    await repository.writeToken(account.id, { accessToken: "refreshed" });
+    await repository.writeToken(account.id, { accessToken: "refreshed" }, stored!.revision);
     expect(await repository.list()).toEqual([]);
     expect(await repository.findByPlatform("linkedin")).toBeUndefined();
     expect(await repository.readToken(account.id)).toBeUndefined();
@@ -39,7 +40,29 @@ describe("authorizedToken", () => {
     const account = await repository.connect("linkedin", profile, { accessToken: "old", refreshToken: "rt", expiresAt: new Date(Date.now() + 1_000) });
     const refreshed: TokenSet = { accessToken: "new", refreshToken: "rt", expiresAt: new Date(Date.now() + 3_600_000), externalId: "acct-1" };
     await expect(authorizedToken(repository, account, async () => refreshed)).resolves.toBe(refreshed);
-    expect(await repository.readToken(account.id)).toEqual(refreshed);
+    expect((await repository.readToken(account.id))?.token).toEqual(refreshed);
+  });
+
+  it.each([true, false])("does not overwrite a reconnected account (disconnect first: %s)", async (disconnect) => {
+    const repository = createMemoryAccountRepository();
+    const original = { accessToken: "old", expiresAt: new Date(0) };
+    const account = await repository.connect("linkedin", profile, original);
+    await authorizedToken(repository, account, async () => {
+      if (disconnect) await repository.disconnect(account.id);
+      await repository.connect("linkedin", profile, original);
+      return { accessToken: "stale" };
+    });
+    expect((await repository.readToken(account.id))?.token).toEqual({ ...original, externalId: profile.id });
+  });
+
+  it("does not overwrite a newer refresh", async () => {
+    const repository = createMemoryAccountRepository();
+    const account = await repository.connect("linkedin", profile, { accessToken: "old", expiresAt: new Date(0) });
+    await authorizedToken(repository, account, async () => {
+      await authorizedToken(repository, account, async () => ({ accessToken: "newer" }));
+      return { accessToken: "stale" };
+    });
+    expect((await repository.readToken(account.id))?.token.accessToken).toBe("newer");
   });
 
   it("fails clearly when no token is stored", async () => {
