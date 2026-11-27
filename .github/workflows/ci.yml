@@ -28,9 +28,9 @@ jobs:
       DATABASE_URL: postgresql://social@localhost:5432/social
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with: { node-version: 22, cache: pnpm }
       - run: pnpm install --frozen-lockfile
       - name: Generate Prisma client
@@ -47,9 +47,9 @@ jobs:
     # with in-memory storage, so it needs no database or platform credentials.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with: { node-version: 22, cache: pnpm }
       - run: pnpm install --frozen-lockfile
       - name: Install Chromium
@@ -58,7 +58,7 @@ jobs:
         run: pnpm e2e
       - name: Upload report and screenshots
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report
           path: |
@@ -71,7 +71,7 @@ jobs:
     # Dockerfile fails CI instead of the next `docker compose up --build`.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Validate docker-compose.yml
         run: cp .env.example .env && docker compose config --quiet
       - name: Build image
