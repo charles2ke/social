@@ -1,5 +1,6 @@
+import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { createSessions, presentedCredential, secretsMatch } from "../src/auth.js";
+import { createSessions, deriveKey, presentedCredential, secretsMatch } from "../src/auth.js";
 
 const adminToken = "a".repeat(40);
 const hour = 3_600_000;
@@ -57,7 +58,10 @@ describe("dashboard sessions", () => {
   });
 
   it("rejects legacy sessions without an issuance timestamp", () => {
-    expect(createSessions(adminToken, hour).verify("s1.9999999999999.nonce.signature")).toBeUndefined();
+    const now = Date.now();
+    const payload = `s1.${now + hour}.nonce`;
+    const signature = createHmac("sha256", deriveKey(adminToken, "dashboard session v1")).update(payload).digest("base64url");
+    expect(createSessions(adminToken, hour).verify(`${payload}.${signature}`, now)).toBeUndefined();
   });
 
   it("revokes a session without affecting others", () => {
