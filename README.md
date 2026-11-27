@@ -217,6 +217,9 @@ Things to know when operating it:
 
 - Session tokens are signed with a key derived from `ADMIN_TOKEN`, so
   rotating `ADMIN_TOKEN` ends every session at once.
+- Lowering `SESSION_TTL_HOURS` shortens existing sessions from their original
+  issuance time. Sessions issued before issuance timestamps were added must
+  sign in again.
 - Signing out is remembered by the API process that handled it. After that
   process restarts, or on another API replica, a signed-out session token
   stays valid until it expires — keep `SESSION_TTL_HOURS` short, or rotate

@@ -64,6 +64,40 @@ describe("downloadMedia", () => {
     await expect(downloadMedia(`${base}/loop`, { maxBytes: 1024, isAllowedAddress: onlyLoopback, maxRedirects: 2 })).rejects.toThrow(/more than 2 redirects/);
   });
 
+  it.each(["redirect", "missing-location", "error"])("closes a discarded %s response without draining its body", async (kind) => {
+    let closed!: () => void;
+    const disconnected = new Promise<void>((resolve) => { closed = resolve; });
+    const { base } = await serve((request, response) => {
+      if (request.url === "/final") {
+        response.end("ok");
+        return;
+      }
+      response.statusCode = kind === "error" ? 500 : 302;
+      if (kind === "redirect") response.setHeader("location", "/final");
+      response.write("first chunk");
+      const interval = setInterval(() => response.write("more"), 10);
+      response.on("close", () => { clearInterval(interval); closed(); });
+    });
+    try {
+      const download = downloadMedia(base, { maxBytes: 1024, timeoutMs: 2_000, isAllowedAddress: onlyLoopback });
+      if (kind === "redirect") {
+        expect(Buffer.from((await download).bytes).toString()).toBe("ok");
+      } else {
+        await expect(download).rejects.toThrow(kind === "error" ? /status 500/ : /no location/);
+      }
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([disconnected, new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error("discarded response was not closed")), 1_000);
+        })]);
+      } finally {
+        clearTimeout(timeout);
+      }
+    } finally {
+      server?.closeAllConnections();
+    }
+  });
+
   it("only downloads over http(s)", async () => {
     await expect(downloadMedia("file:///etc/passwd", { maxBytes: 1024 })).rejects.toThrow(/http\(s\)/);
   });

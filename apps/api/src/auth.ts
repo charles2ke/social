@@ -26,12 +26,12 @@ export type Sessions = {
   revoke(token: string, now?: number): void;
 };
 
-const PREFIX = "s1";
+const PREFIX = "s2";
 
 /**
  * Short-lived dashboard sessions, so a browser holds a token that expires on
  * its own rather than the admin token itself. A session is
- * `s1.<expiry>.<nonce>.<hmac>`, signed with a key derived from ADMIN_TOKEN:
+ * `s2.<issuedAt>.<expiry>.<nonce>.<hmac>`, signed with a key derived from ADMIN_TOKEN:
  * rotating ADMIN_TOKEN ends every session. Signing out revokes one session in
  * this process (sessions are otherwise stateless, so a revocation is not seen
  * by other API instances).
@@ -43,18 +43,20 @@ export function createSessions(adminToken: string, ttlMs: number): Sessions {
 
   const parse = (token: string, now: number) => {
     const parts = token.split(".");
-    if (parts.length !== 4 || parts[0] !== PREFIX) return undefined;
-    const [, expiry, nonce, signature] = parts as [string, string, string, string];
-    if (!secretsMatch(signature, sign(`${PREFIX}.${expiry}.${nonce}`))) return undefined;
-    const expiresAt = Number(expiry);
-    // A session from before the TTL was lowered must not outlive the new TTL.
-    if (!Number.isSafeInteger(expiresAt) || expiresAt <= now || expiresAt - now > ttlMs) return undefined;
+    if (parts.length !== 5 || parts[0] !== PREFIX) return undefined;
+    const [, issued, expiry, nonce, signature] = parts as [string, string, string, string, string];
+    if (!secretsMatch(signature, sign(`${PREFIX}.${issued}.${expiry}.${nonce}`))) return undefined;
+    const issuedAt = Number(issued);
+    const originalExpiry = Number(expiry);
+    if (!Number.isSafeInteger(issuedAt) || !Number.isSafeInteger(originalExpiry) || issuedAt > now || originalExpiry <= issuedAt) return undefined;
+    const expiresAt = Math.min(originalExpiry, issuedAt + ttlMs);
+    if (expiresAt <= now) return undefined;
     return revoked.has(nonce) ? undefined : { nonce, expiresAt };
   };
 
   return {
     issue(now = Date.now()) {
-      const payload = `${PREFIX}.${now + ttlMs}.${randomBytes(16).toString("base64url")}`;
+      const payload = `${PREFIX}.${now}.${now + ttlMs}.${randomBytes(16).toString("base64url")}`;
       return { token: `${payload}.${sign(payload)}`, expiresAt: new Date(now + ttlMs) };
     },
     verify(token, now = Date.now()) {

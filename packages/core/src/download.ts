@@ -103,7 +103,7 @@ export async function downloadMedia(url: string, options: DownloadOptions): Prom
     const response = await get(current, lookup, timeoutMs);
     const status = response.statusCode ?? 0;
     if (redirectStatuses.has(status)) {
-      response.resume();
+      response.destroy();
       const location = response.headers.location;
       if (!location) throw new DownloadError(`Media download redirect (status ${status}) had no location`);
       if (redirects >= maxRedirects) throw new DownloadError(`Media download followed more than ${maxRedirects} redirects`);
@@ -111,7 +111,7 @@ export async function downloadMedia(url: string, options: DownloadOptions): Prom
       continue;
     }
     if (status < 200 || status >= 300) {
-      response.resume();
+      response.destroy();
       throw new DownloadError(`Could not download the media (status ${status})`);
     }
     const tooLarge = () => {
