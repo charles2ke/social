@@ -26,7 +26,8 @@ Even with app-layer AES-256-GCM encryption, defense-in-depth argues for a
 database that can enforce least privilege: the scheduler worker should not
 need the same grants as the OAuth callback handler. Postgres gives us a
 real role/privilege system (see `social_worker` in
-`packages/db/prisma/init/01-social-worker-role.sql`), TLS-enforced
+`packages/db/prisma/init/01-social-worker-role.sql`, and its table grants
+in the `20261001000000_social_worker_grants` migration), TLS-enforced
 connections (`sslmode=require`), and `pgcrypto`/TDE options as additional
 defense-in-depth layers. SQLite only offers filesystem permissions — any
 process that can read the file can read every token in it.

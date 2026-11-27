@@ -6,6 +6,26 @@ const media = [{ url: "https://example.com/a.jpg", kind: "image" as const }];
 const published = async (platform: PlatformId) => ({ platformPostId: `${platform}-1`, publishedAt: new Date() });
 
 describe("post repository", () => {
+  it("validates the current merged post before edits, scheduling and publishing", async () => {
+    const posts = createMemoryPostRepository();
+    const draft = await posts.create({ text: "hello", platforms: ["linkedin"] });
+    const when = new Date(Date.now() + 60_000);
+    await posts.schedule(draft.id, when);
+    await expect(posts.update(draft.id, { platforms: [] })).rejects.toThrow("At least one platform is required");
+    await expect(posts.update(draft.id, { platformOverrides: { linkedin: { text: "x".repeat(3001) } } })).rejects.toThrow();
+    expect(await posts.get(draft.id)).toMatchObject({ status: "scheduled", platforms: ["linkedin"], text: "hello" });
+
+    const other = await posts.create({ text: "hello", platforms: ["linkedin"] });
+    await posts.update(other.id, { text: "x".repeat(3001) });
+    await expect(posts.schedule(other.id, when)).rejects.toThrow();
+    const publish = vi.fn(published);
+    await expect(posts.publishNow(other.id, { publish })).rejects.toThrow();
+    expect(publish).not.toHaveBeenCalled();
+    expect(await posts.get(other.id)).toMatchObject({ status: "draft", text: "x".repeat(3001) });
+    await posts.update(other.id, { text: "hello", platforms: [] });
+    await expect(posts.publishNow(other.id, { publish })).rejects.toThrow("At least one platform is required");
+  });
+
   it("creates a draft that is not scheduled", async () => {
     const posts = createMemoryPostRepository();
     const draft = await posts.create({ text: "hello", media });
@@ -16,7 +36,7 @@ describe("post repository", () => {
 
   it("schedules a draft for the worker to pick up", async () => {
     const posts = createMemoryPostRepository();
-    const draft = await posts.create({ text: "hello" });
+    const draft = await posts.create({ text: "hello", platforms: ["linkedin"] });
     const when = new Date(Date.now() + 60_000);
 
     const scheduled = await posts.schedule(draft.id, when);

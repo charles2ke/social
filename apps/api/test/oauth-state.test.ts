@@ -1,35 +1,36 @@
-import { beforeEach, describe, expect, it } from "vitest";
-import { createState, verifyState } from "../src/oauth-state.js";
+import { describe, expect, it } from "vitest";
+import { createOAuthStates } from "../src/oauth-state.js";
 
 describe("oauth state", () => {
-  beforeEach(() => {
-    process.env.OAUTH_STATE_SECRET = "state-secret";
-  });
-
-  it("round-trips a state value for the platform that issued it", () => {
-    const state = createState("linkedin");
-    expect(verifyState(state, "linkedin")).toBe(true);
+  it("round-trips the page to return to, once", () => {
+    const states = createOAuthStates("state-secret");
+    const state = states.create("linkedin", "https://dashboard.example/setup");
+    expect(states.consume(state, "linkedin")).toEqual({ returnTo: "https://dashboard.example/setup" });
+    expect(states.consume(state, "linkedin")).toBeUndefined();
+    expect(states.consume(states.create("linkedin"), "linkedin")).toEqual({});
   });
 
   it("rejects a state issued for a different platform", () => {
-    expect(verifyState(createState("linkedin"), "facebook")).toBe(false);
+    const states = createOAuthStates("state-secret");
+    expect(states.consume(states.create("linkedin"), "facebook")).toBeUndefined();
   });
 
-  it("rejects tampered or malformed state", () => {
-    const state = createState("linkedin");
-    expect(verifyState(`${state}x`, "linkedin")).toBe(false);
-    expect(verifyState(state.replace(/^linkedin/, "facebook"), "facebook")).toBe(false);
-    expect(verifyState("not-a-state", "linkedin")).toBe(false);
-  });
-
-  it("rejects state signed with a different secret", () => {
-    const state = createState("linkedin");
-    process.env.OAUTH_STATE_SECRET = "other-secret";
-    expect(verifyState(state, "linkedin")).toBe(false);
+  it("rejects tampered, malformed or foreign state", () => {
+    const states = createOAuthStates("state-secret");
+    const state = states.create("linkedin", "https://dashboard.example/setup");
+    const parts = state.split(".");
+    expect(states.consume(`${state}x`, "linkedin")).toBeUndefined();
+    expect(states.consume(state.replace(/^linkedin/, "facebook"), "facebook")).toBeUndefined();
+    parts[3] = Buffer.from("https://attacker.example/").toString("base64url");
+    expect(states.consume(parts.join("."), "linkedin")).toBeUndefined();
+    expect(states.consume("not-a-state", "linkedin")).toBeUndefined();
+    expect(createOAuthStates("other-secret").consume(state, "linkedin")).toBeUndefined();
   });
 
   it("expires state after ten minutes", () => {
-    const state = createState("linkedin");
-    expect(verifyState(state, "linkedin", Date.now() + 11 * 60_000)).toBe(false);
+    const states = createOAuthStates("state-secret");
+    const issuedAt = Date.now();
+    expect(states.consume(states.create("linkedin", undefined, issuedAt), "linkedin", issuedAt + 10 * 60_000)).toBeUndefined();
+    expect(states.consume(states.create("linkedin", undefined, issuedAt), "linkedin", issuedAt + 9 * 60_000)).toEqual({});
   });
 });

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
-import { redactSecrets, type PlatformId } from "@social/core";
+import { assertEncryptionKey, redactSecrets, type PlatformId } from "@social/core";
 import {
   DEFAULT_CLAIM_TIMEOUT_MS,
   claimDuePosts,
@@ -11,6 +11,7 @@ import {
   type PrismaClient,
 } from "@social/db";
 import { createAccountRepository } from "./accounts.js";
+import { numberEnv, stringEnv } from "./env.js";
 import { createPublisher } from "./publisher.js";
 import { publishClaimedPost, type PublishFn } from "./publishing.js";
 
@@ -76,15 +77,18 @@ export async function runWorkerTick(options: WorkerOptions): Promise<WorkerTickR
  * WORKER_DATABASE_URL role.
  */
 export async function startWorker(): Promise<void> {
-  const databaseUrl = process.env.WORKER_DATABASE_URL ?? process.env.DATABASE_URL;
+  const databaseUrl = stringEnv(process.env, "WORKER_DATABASE_URL") ?? stringEnv(process.env, "DATABASE_URL");
   if (!databaseUrl) throw new Error("WORKER_DATABASE_URL or DATABASE_URL must be set — the scheduler worker has no queue to poll without a database");
   process.env.DATABASE_URL = databaseUrl;
+  // Validate everything up front: a bad key or setting must stop the worker, not fail every claimed post.
+  assertEncryptionKey();
+  const intervalMs = numberEnv(process.env, "WORKER_POLL_INTERVAL_MS", 15_000, { min: 100, integer: true });
+  const batchSize = numberEnv(process.env, "WORKER_BATCH_SIZE", 5, { min: 1, integer: true });
+  const workerId = stringEnv(process.env, "WORKER_ID") ?? `worker-${randomUUID()}`;
 
   const prisma = getPrismaClient();
   const repository = await createAccountRepository();
   const publisher = createPublisher(repository, { mockMode: process.env.MOCK_MODE === "true" });
-  const intervalMs = Number(process.env.WORKER_POLL_INTERVAL_MS ?? 15_000);
-  const workerId = process.env.WORKER_ID ?? `worker-${randomUUID()}`;
 
   let stopping = false;
   let inFlight: Promise<unknown> = Promise.resolve();
@@ -107,7 +111,7 @@ export async function startWorker(): Promise<void> {
       workerId,
       publish: publisher.publish,
       accountIdFor: async (platform) => (await publisher.accountFor(platform))?.id,
-      batchSize: Number(process.env.WORKER_BATCH_SIZE ?? 5),
+      batchSize,
     })
       .then((result) => {
         if (result.claimed || result.requeued) console.log(JSON.stringify({ level: "info", msg: "scheduler tick", workerId, ...result }));

@@ -3,10 +3,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "dev:worker": "tsx watch src/worker.ts",
-    "start": "node dist/apps/api/src/index.js",
-    "start:worker": "node dist/apps/api/src/worker.js",
+    "dev": "node ../../scripts/with-env.mjs tsx watch src/index.ts",
+    "dev:worker": "node ../../scripts/with-env.mjs tsx watch src/worker.ts",
+    "start": "node ../../scripts/with-env.mjs node dist/apps/api/src/index.js",
+    "start:worker": "node ../../scripts/with-env.mjs node dist/apps/api/src/worker.js",
     "build": "tsc -p tsconfig.json",
     "lint": "eslint src test",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -16,10 +16,10 @@
     "@fastify/rate-limit": "10.3.0",
     "@social/core": "workspace:*",
     "@social/db": "workspace:*",
-    "fastify": "5.12.1"
+    "fastify": "5.12.8"
   },
   "devDependencies": {
-    "tsx": "4.19.2",
-    "vitest": "3.2.6"
+    "tsx": "4.23.15",
+    "vitest": "4.1.12"
   }
 }

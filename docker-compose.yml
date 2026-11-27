@@ -1,7 +1,22 @@
-# `docker compose up` is a single-command start: Postgres boots first (with
-# packages/db/prisma/init/*.sql applied automatically to create the
-# least-privilege social_worker role), then the app waits for it to report
-# healthy before starting. See docs/adr/0001-database.md and README.md.
+# `docker compose up --build` is a single-command start: Postgres boots first
+# (with packages/db/prisma/init/*.sql applied automatically to create the
+# least-privilege social_worker role), a one-off `migrate` job applies the
+# migrations, and then the API, dashboard and scheduler worker start. See
+# docs/adr/0001-database.md and README.md "Running with Docker".
+#
+# Every port is published on 127.0.0.1 only. Put a TLS-terminating reverse
+# proxy in front before exposing anything to a network.
+
+x-app: &app
+  # Built by the migrate service below; it never comes from a registry.
+  image: social-app:local
+  pull_policy: never
+  init: true
+  restart: unless-stopped
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
 
 services:
   postgres:
@@ -15,7 +30,7 @@ services:
       # see .env.example's commented `sslmode=require` example instead.
       POSTGRES_HOST_AUTH_METHOD: ${POSTGRES_HOST_AUTH_METHOD:-trust}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./packages/db/prisma/init:/docker-entrypoint-initdb.d:ro
@@ -25,22 +40,61 @@ services:
       timeout: 5s
       retries: 10
 
-  social:
-    build: .
-    ports: ["3000:3000", "3001:3001"]
-    env_file: .env
+  # Applies pending migrations (including the social_worker grants), then exits.
+  # It also builds the image that every app service runs: they all depend on
+  # it, and a single builder avoids parallel builds racing to tag one image.
+  migrate:
+    <<: *app
+    build:
+      context: .
+      args:
+        # Baked into the dashboard at build time: rebuild after changing it.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3001}
+    restart: "no"
+    working_dir: /app/packages/db
+    command: ["node_modules/.bin/prisma", "migrate", "deploy"]
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-social}@postgres:5432/${POSTGRES_DB:-social}
     depends_on:
       postgres:
         condition: service_healthy
 
+  api:
+    <<: *app
+    command: ["node", "apps/api/dist/apps/api/src/index.js"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-social}@postgres:5432/${POSTGRES_DB:-social}
+      # Listen on the container network; the published port stays on 127.0.0.1.
+      API_HOST: 0.0.0.0
+      API_PORT: "3001"
+    ports: ["127.0.0.1:3001:3001"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/ready').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # The dashboard is static pages plus browser code: it gets no secrets.
+  web:
+    <<: *app
+    working_dir: /app/apps/web
+    command: ["node", "node_modules/next/dist/bin/next", "start", "--port", "3000"]
+    tmpfs: ["/tmp", "/app/apps/web/.next/cache:uid=1000,gid=1000"]
+    ports: ["127.0.0.1:3000:3000"]
+    depends_on:
+      api:
+        condition: service_started
+
   # The scheduler worker runs as its own process so publishing keeps going
   # independently of the HTTP API, and so it can connect as the
   # least-privilege social_worker role (WORKER_DATABASE_URL).
   worker:
-    build: .
-    command: ["sh", "-c", "corepack pnpm --filter @social/api run start:worker"]
+    <<: *app
+    command: ["node", "apps/api/dist/apps/api/src/worker.js"]
     env_file: .env
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-social}@postgres:5432/${POSTGRES_DB:-social}
@@ -51,8 +105,8 @@ services:
       # (e.g. postgresql://social_worker:<password>@db:5432/social?sslmode=require).
       WORKER_DATABASE_URL: ${WORKER_DATABASE_URL_CONTAINER:-postgresql://social_worker@postgres:5432/${POSTGRES_DB:-social}}
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
 volumes:
   postgres_data:

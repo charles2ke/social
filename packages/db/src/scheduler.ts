@@ -94,14 +94,14 @@ const CLAIMABLE_NOW_STATUSES = ["DRAFT", "SCHEDULED", "FAILED"] as const;
  * requeues the post for the worker instead of stranding it.
  */
 export async function claimPost(
-  prisma: PrismaClient,
+  prisma: Prisma.TransactionClient,
   postId: string,
   workerId: string,
   options: {
     now?: Date;
     claimTimeoutMs?: number;
     claimToken?: string;
-    data?: Pick<Prisma.PostUpdateManyMutationInput, "content" | "mediaUrls" | "platforms">;
+    data?: Pick<Prisma.PostUpdateManyMutationInput, "content" | "mediaUrls" | "platforms" | "platformOverrides">;
   } = {},
 ): Promise<Post | null> {
   const now = options.now ?? new Date();

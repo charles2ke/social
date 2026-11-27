@@ -1,5 +1,6 @@
 import path from "node:path";
-import { expect, test, type Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
+import { expect, test } from "./fixtures";
 import { apiOrigin, docsScreenshots } from "./servers";
 import { stubMediaCdn, toLocalInputValue } from "./helpers";
 
@@ -38,6 +39,9 @@ test("composing a scheduled post in light mode", async ({ page }) => {
   await page.getByLabel("Alt text").fill("The Social dashboard on a laptop");
   await page.getByRole("button", { name: "Add media" }).click();
   await page.getByRole("button", { name: "Select all" }).click();
+  await page.getByRole("button", { name: "Customize LinkedIn" }).click();
+  await page.getByLabel("LinkedIn text").fill("Launch day! Social is a self-hosted, AGPL-licensed manager that publishes to every network at once — from a dashboard, an API, or an MCP client.");
+  await expect(page.getByRole("list", { name: "Character limits" }).getByRole("listitem").filter({ hasText: "LinkedIn" })).toContainText("(custom)");
   await page.getByLabel("Schedule for later").check();
   const publishAt = page.getByLabel("Publish at");
   await publishAt.fill(toLocalInputValue(new Date(Date.now() + 7 * 86_400_000)));
@@ -46,9 +50,9 @@ test("composing a scheduled post in light mode", async ({ page }) => {
   await capture(page, "compose");
 });
 
-test("posts list in light mode", async ({ page, request }) => {
+test("posts list in light mode", async ({ page, api }) => {
   const call = async (route: string, data?: object) => {
-    const response = await request.post(`${apiOrigin}${route}`, data ? { data } : {});
+    const response = await api.post(route, data ? { data } : {});
     expect(response.ok(), `${route} answered ${response.status()}`).toBeTruthy();
     return (await response.json()) as { id: string; post?: { id: string } };
   };

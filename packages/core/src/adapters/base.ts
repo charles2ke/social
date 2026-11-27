@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { type Downloader, downloadMedia } from "../download.js";
 import { ConfigurationError, defaultFetch, type FetchLike, requestJson } from "../http.js";
 import { buildAuthorizeUrl, exchangeAuthorizationCode, type Env, type OAuthSpec, refreshAccessToken } from "../oauth.js";
 import { normalizeMedia, validateMedia } from "../media.js";
+import { validateText } from "../text.js";
 import {
   type Capabilities,
   type MediaAttachment,
@@ -13,6 +15,7 @@ import {
   type PostRef,
   type Profile,
   type PublishResult,
+  type TextConstraints,
   type TokenSet,
   UnsupportedOperation,
 } from "../types.js";
@@ -24,6 +27,8 @@ export type AdapterContext = {
   /** Bearer-authenticated JSON request against the platform's API. */
   request<T>(url: string, init?: RequestInit): Promise<T>;
   fetch: FetchLike;
+  /** Fetches media bytes from a post's URL with SSRF and size guards. */
+  download: Downloader;
 };
 
 /** A draft whose legacy `mediaUrls` have been merged into typed, validated attachments. */
@@ -36,6 +41,8 @@ export type PlatformSpec = {
   capabilities: Capabilities;
   /** Image/video limits the platform's publishing endpoint enforces. */
   mediaConstraints?: MediaConstraints;
+  /** Text limits the platform enforces (or that the adapter would otherwise have to truncate to). */
+  textConstraints?: TextConstraints;
   oauth?: OAuthSpec;
   getProfile?(ctx: AdapterContext): Promise<Profile>;
   publish?(ctx: AdapterContext, post: NormalizedDraft): Promise<PublishResult>;
@@ -44,7 +51,7 @@ export type PlatformSpec = {
   publishUnsupported?: string;
 };
 
-export type AdapterDeps = { fetch?: FetchLike; env?: Env };
+export type AdapterDeps = { fetch?: FetchLike; env?: Env; download?: Downloader };
 
 /** The account id a platform's endpoints are scoped to, captured at connect time. */
 export function requireExternalId(ctx: AdapterContext): string {
@@ -66,6 +73,7 @@ export class ApiAdapter implements PlatformAdapter {
   readonly id: PlatformId;
   readonly capabilities: Capabilities;
   readonly mediaConstraints: MediaConstraints;
+  readonly textConstraints: TextConstraints | undefined;
 
   constructor(
     private readonly spec: PlatformSpec,
@@ -74,6 +82,7 @@ export class ApiAdapter implements PlatformAdapter {
     this.id = spec.id;
     this.capabilities = spec.capabilities;
     this.mediaConstraints = spec.mediaConstraints ?? noMedia;
+    this.textConstraints = spec.textConstraints;
   }
 
   private get env(): Env {
@@ -93,6 +102,7 @@ export class ApiAdapter implements PlatformAdapter {
       token,
       env: this.env,
       fetch: doFetch,
+      download: this.deps.download ?? downloadMedia,
       request: <T>(url: string, init: RequestInit = {}) =>
         requestJson<T>(platform, doFetch, url, {
           ...init,
@@ -107,7 +117,10 @@ export class ApiAdapter implements PlatformAdapter {
   }
 
   getAuthUrl(state: string): string {
-    if (mockMode(this.env)) return `https://auth.${this.id}.example/authorize?state=${encodeURIComponent(state)}`;
+    // Mock mode has no provider to send the browser to, so it approves at once
+    // by going straight to this API's callback (relative, so it resolves
+    // against whatever URL the API was reached on).
+    if (mockMode(this.env)) return `/api/oauth/${this.id}/callback?${new URLSearchParams({ code: "mock-authorization-code", state })}`;
     return buildAuthorizeUrl(this.id, this.oauth(), this.env, state);
   }
 
@@ -135,6 +148,7 @@ export class ApiAdapter implements PlatformAdapter {
     const media = normalizeMedia(draft);
     if (!draft.text.trim() && !media.length) throw new Error("Post text is required");
     validateMedia(this.id, this.capabilities, this.mediaConstraints, media);
+    validateText(this.id, this.textConstraints, draft.text);
     if (mockMode(this.env)) return { platformPostId: `${this.id}-${randomUUID()}`, publishedAt: new Date() };
     if (!this.spec.publish) throw new UnsupportedOperation(this.id, "publishing until its API client is configured");
     return this.spec.publish(this.context(token), { ...draft, media });

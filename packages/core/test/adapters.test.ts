@@ -234,6 +234,10 @@ describe("analytics", () => {
 });
 
 describe("secret handling", () => {
+  it("redacts camelCase token fields and bearer credentials", () => {
+    const redacted = redactSecrets('{"accessToken":"at-1","refreshToken":"rt-1","id_token":"id-1","password":"pw-1"} Authorization: Bearer abc.DEF-123=');
+    for (const secret of ["at-1", "rt-1", "id-1", "pw-1", "abc.DEF-123"]) expect(redacted).not.toContain(secret);
+  });
   it("redacts tokens from anything that can reach an error message or log", () => {
     const redacted = redactSecrets('{"access_token":"abc","refresh_token":"def"} client_secret=xyz&code=123');
     expect(redacted).not.toMatch(/abc|def|xyz|123/);
@@ -264,7 +268,7 @@ describe("mock mode", () => {
     const adapters = createAdapters({ env: { MOCK_MODE: "true" }, fetch: doFetch });
     const result = await adapters.linkedin.publish({ accessToken: "mock" }, { text: "Hello" });
     expect(result.platformPostId).toMatch(/^linkedin-/);
-    expect(adapters.linkedin.getAuthUrl("s")).toContain("auth.linkedin.example");
+    expect(adapters.linkedin.getAuthUrl("s")).toBe("/api/oauth/linkedin/callback?code=mock-authorization-code&state=s");
     expect(calls).toHaveLength(0);
   });
 });

@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures";
 import { choosePlatforms, snap, stubMediaCdn, toLocalInputValue, uniqueText } from "./helpers";
 import { apiOrigin } from "./servers";
 
@@ -42,6 +42,43 @@ test("saves a draft, edits it from Posts and publishes it from the list", async 
   await expect(page.getByRole("status")).toContainText("Published to LinkedIn.");
   await expect(editedCard).toContainText("Published");
   await expect(editedCard.getByRole("listitem")).toHaveText(["LinkedIn published"]);
+});
+
+test("customizes the text per platform and holds back text over a platform's limit", async ({ page }) => {
+  const label = uniqueText("Long form");
+  const long = `${label} ${"x".repeat(3000)}`;
+  await page.goto("/");
+  await page.getByLabel("Post text").fill(long);
+  await choosePlatforms(page, ["LinkedIn", "Facebook"]);
+  const limits = page.getByRole("list", { name: "Character limits" });
+  await expect(limits.getByRole("listitem").filter({ hasText: "LinkedIn" })).toHaveText(`LinkedIn: ${long.length.toLocaleString("en-US")}/3,000 — too long`);
+  await expect(limits.getByRole("listitem").filter({ hasText: "Facebook" })).toHaveText(`Facebook: ${long.length.toLocaleString("en-US")}/63,206`);
+
+  await page.getByRole("button", { name: "Publish now" }).click();
+  await expect(page.getByRole("status")).toContainText("The text is too long for LinkedIn.");
+
+  await page.getByRole("button", { name: "Customize LinkedIn" }).click();
+  await expect(page.getByLabel("LinkedIn text")).toHaveValue(long);
+  const custom = uniqueText("The short version for LinkedIn");
+  await page.getByLabel("LinkedIn text").fill(custom);
+  await expect(limits.getByRole("listitem").filter({ hasText: "LinkedIn" })).toHaveText(`LinkedIn (custom): ${custom.length}/3,000`);
+  await page.getByRole("button", { name: "Save draft" }).click();
+  await expect(page.getByRole("status")).toContainText("Draft saved.");
+  await expect(page).toHaveURL(/\?post=/);
+
+  // The custom text is stored with the post and comes back when it is opened again.
+  await page.reload();
+  await expect(page.getByLabel("LinkedIn text")).toHaveValue(custom);
+  await expect(page.getByLabel("Post text")).toHaveValue(long);
+  await snap(page, "composer-overrides");
+
+  await page.getByRole("button", { name: "Publish now" }).click();
+  const status = page.getByRole("status");
+  await expect(status).toContainText("Published.");
+  await expect(status.getByRole("listitem")).toHaveCount(2);
+
+  await page.goto("/posts");
+  await expect(page.getByRole("article").filter({ hasText: label })).toContainText("Custom text for LinkedIn");
 });
 
 test("records a partial failure and retries only the platform that failed", async ({ page }) => {
@@ -134,9 +171,9 @@ test("returns to a blank post when leaving an edit through the Composer link", a
   await expect(page.getByRole("region", { name: "Editing a saved post" })).toHaveCount(0);
 });
 
-test("keeps actions disabled when an obsolete saved-post load finishes", async ({ page, request }) => {
-  const first = await (await request.post(`${apiOrigin}/drafts`, { data: { text: uniqueText("First"), platforms: ["linkedin"] } })).json();
-  const second = await (await request.post(`${apiOrigin}/drafts`, { data: { text: uniqueText("Second"), platforms: ["linkedin"] } })).json();
+test("keeps actions disabled when an obsolete saved-post load finishes", async ({ page, api }) => {
+  const first = await (await api.post("/drafts", { data: { text: uniqueText("First"), platforms: ["linkedin"] } })).json();
+  const second = await (await api.post("/drafts", { data: { text: uniqueText("Second"), platforms: ["linkedin"] } })).json();
   await page.goto("/");
 
   let releaseFirst!: () => void;
@@ -197,9 +234,9 @@ test("shows the later of the scheduled and retry times for queued posts", async 
 });
 
 for (const action of ["save", "save-error", "schedule", "publish"] as const) {
-  test(`ignores a late ${action} response after leaving an edit`, async ({ page, request }) => {
+  test(`ignores a late ${action} response after leaving an edit`, async ({ page, api }) => {
     const original = uniqueText("Original post");
-    const created = await request.post(`${apiOrigin}/drafts`, { data: { text: original, platforms: ["linkedin"] } });
+    const created = await api.post("/drafts", { data: { text: original, platforms: ["linkedin"] } });
     const { id } = (await created.json()) as { id: string };
     await page.goto(`/?post=${id}`);
     await expect(page.getByLabel("Post text")).toHaveValue(original);
@@ -258,7 +295,7 @@ for (const action of ["save", "save-error", "schedule", "publish"] as const) {
     await expect(page).toHaveURL(/\?post=/);
     const newId = new URL(page.url()).searchParams.get("post");
     expect(newId).not.toBe(id);
-    expect(await (await request.get(`${apiOrigin}/posts/${newId}`)).json()).toMatchObject({ text: fresh });
+    expect(await (await api.get(`/posts/${newId}`)).json()).toMatchObject({ text: fresh });
   });
 }
 

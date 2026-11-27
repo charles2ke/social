@@ -38,13 +38,14 @@ export function credentials(platform: PlatformId, spec: OAuthSpec, env: Env) {
 }
 
 /**
- * Where the platform sends the user back. Documented in `.env.example` as
- * `BASE_URL/api/oauth/<platform>/callback`; `OAUTH_REDIRECT_BASE_URL` allows
- * pointing at the API origin when it differs from the dashboard origin.
+ * Where the platform sends the user back: the API's own
+ * `/api/oauth/<platform>/callback`. `OAUTH_REDIRECT_BASE_URL` is the API's
+ * public URL; `BASE_URL` is only a fallback, for deployments that serve the
+ * API and dashboard from one origin. Empty values count as unset.
  */
 export function redirectUri(platform: PlatformId, env: Env): string {
-  const base = env.OAUTH_REDIRECT_BASE_URL ?? env.BASE_URL;
-  if (!base) throw new ConfigurationError(platform, "BASE_URL (or OAUTH_REDIRECT_BASE_URL)");
+  const base = env.OAUTH_REDIRECT_BASE_URL?.trim() || env.BASE_URL?.trim();
+  if (!base) throw new ConfigurationError(platform, "OAUTH_REDIRECT_BASE_URL (the API's public URL)");
   return `${base.replace(/\/$/, "")}/api/oauth/${platform}/callback`;
 }
 

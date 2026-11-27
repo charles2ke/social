@@ -83,7 +83,8 @@ export default function PostsPage() {
       setPosts(await callApi<StoredPost[]>("/posts", { signal }));
       setLoadError(undefined);
     } catch (error) {
-      if (!signal?.aborted) setLoadError(errorMessage(error));
+      // A 401 brings up the sign-in dialog instead; the next refresh picks up the new session.
+      if (!signal?.aborted && !(error instanceof ApiError && error.status === 401)) setLoadError(errorMessage(error));
     }
   }, []);
 
@@ -262,6 +263,11 @@ export default function PostsPage() {
                 <p className="line-clamp-4 whitespace-pre-wrap break-words text-sm leading-relaxed">
                   {post.text || <span className="italic text-ink-muted">No text</span>}
                 </p>
+                {Object.keys(post.platformOverrides ?? {}).length > 0 ? (
+                  <p className="flex items-center gap-1 text-xs text-ink-muted">
+                    <PencilIcon width={12} height={12} /> Custom text for {labels(Object.keys(post.platformOverrides ?? {}))}
+                  </p>
+                ) : null}
                 {post.media.length > 0 ? (
                   <p className="text-xs text-ink-muted">
                     {post.media.length} attachment{post.media.length === 1 ? "" : "s"}
