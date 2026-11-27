@@ -1,5 +1,5 @@
 "use client";
-import { type FormEvent, type ReactNode, useCallback, useEffect, useState } from "react";
+import { type FormEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { apiUrl } from "../config";
 import { clearSession, sessionChanged, sessionToken, storeSession } from "../session";
 
@@ -20,6 +20,7 @@ const maxTimeout = 2_147_483_647;
 /** Follows the API's view of the stored session, re-checking whenever it is stored, dropped or expires. */
 export function useSession(): Session {
   const [state, setState] = useState<SessionState>({ kind: "checking" });
+  const checkController = useRef<AbortController | null>(null);
   // Once pages were shown, an ended session covers them instead of unmounting them, so unsaved edits survive signing in again.
   const [contentShown, setContentShown] = useState(false);
 
@@ -50,16 +51,16 @@ export function useSession(): Session {
   }, []);
 
   useEffect(() => {
-    let controller = new AbortController();
-    void check(controller.signal);
     const recheck = () => {
-      controller.abort();
-      controller = new AbortController();
+      checkController.current?.abort();
+      const controller = new AbortController();
+      checkController.current = controller;
       void check(controller.signal);
     };
     window.addEventListener(sessionChanged, recheck);
+    recheck();
     return () => {
-      controller.abort();
+      checkController.current?.abort();
       window.removeEventListener(sessionChanged, recheck);
     };
   }, [check]);
@@ -75,10 +76,12 @@ export function useSession(): Session {
 
   const signOut = useCallback(async () => {
     const token = sessionToken();
+    checkController.current?.abort();
+    clearSession({ notify: false });
     setContentShown(false);
+    setState({ kind: "signed-out" });
     // Revoke it on the API too, so a copy of the token stops working now rather than when it expires.
     if (token) await fetch(`${apiUrl}/auth/logout`, { method: "POST", headers: { Authorization: `Bearer ${token}` } }).catch(() => undefined);
-    clearSession();
   }, []);
 
   return { state, signOut, contentShown };
@@ -159,6 +162,27 @@ function SignInForm({ ended }: { ended: boolean }) {
   );
 }
 
+function ReauthenticationDialog() {
+  const dialog = useRef<HTMLDialogElement>(null);
+
+  useLayoutEffect(() => {
+    const element = dialog.current;
+    element?.showModal();
+    return () => element?.close();
+  }, []);
+
+  return (
+    <dialog
+      ref={dialog}
+      aria-labelledby="sign-in-title"
+      onCancel={(event) => event.preventDefault()}
+      className="m-auto max-h-[calc(100%-2rem)] w-[calc(100%-2rem)] max-w-md bg-transparent p-0 text-inherit backdrop:bg-black/40 backdrop:backdrop-blur-sm"
+    >
+      <SignInForm ended />
+    </dialog>
+  );
+}
+
 /**
  * Renders the pages once the API either needs no sign-in or has a valid
  * session. When a session ends while pages are open, they stay mounted (and
@@ -178,16 +202,7 @@ export function SessionGate({ session, children }: { session: Session; children:
   return (
     <>
       <div inert={locked}>{children}</div>
-      {locked ? (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="sign-in-title"
-          className="fixed inset-0 z-30 grid place-items-center overflow-y-auto bg-black/40 p-4 backdrop-blur-sm"
-        >
-          <SignInForm ended />
-        </div>
-      ) : null}
+      {locked ? <ReauthenticationDialog /> : null}
     </>
   );
 }

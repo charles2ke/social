@@ -22,7 +22,7 @@ import { createSessions, presentedCredential, secretsMatch } from "./auth.js";
 import type { ApiConfig } from "./config.js";
 import { createOAuthStates } from "./oauth-state.js";
 import { hasOverrides, parsePlatformOverrides } from "./overrides.js";
-import { isEditable, type PostInput, type PostPublisher, type PostRepository, type PostStatus } from "./posts.js";
+import { isEditable, PostValidationError, type PostInput, type PostPublisher, type PostRepository, type PostStatus } from "./posts.js";
 import type { Publisher } from "./publisher.js";
 
 declare module "fastify" {
@@ -105,7 +105,7 @@ function textLimitError(platforms: readonly PlatformId[], text: string, override
 
 /** Errors with a message meant for the user, and the status they map to. */
 function knownErrorStatus(error: unknown): number | undefined {
-  if (error instanceof MediaValidationError || error instanceof TextValidationError || error instanceof ConfigurationError) return 400;
+  if (error instanceof MediaValidationError || error instanceof TextValidationError || error instanceof ConfigurationError || error instanceof PostValidationError) return 400;
   if (error instanceof UnsupportedOperation) return 501;
   if (error instanceof PlatformApiError) return 502;
   return undefined;
@@ -271,14 +271,6 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     if (!isPostId(request.params.id)) return reply.code(400).send({ error: "Invalid draft id" });
     const changes = resolveChanges(asBody(request.body), { allowNoPlatforms: true });
     if (changes instanceof Error) return reply.code(400).send({ error: changes.message });
-    // A scheduled post stays queued for the worker, so an edit must leave it publishable, as /schedule requires.
-    const existing = await posts.get(request.params.id);
-    if (existing?.status === "scheduled") {
-      const platforms = changes.platforms ?? existing.platforms;
-      if (!platforms.length) return reply.code(400).send({ error: "At least one platform is required" });
-      const textError = textLimitError(platforms, changes.text ?? existing.text, changes.platformOverrides ?? existing.platformOverrides);
-      if (textError) return reply.code(400).send({ error: textError });
-    }
     const draft = await posts.update(request.params.id, changes);
     if (!draft) return reply.code(404).send({ error: "Draft not found" });
     if (!isEditable(draft.status)) return reply.code(409).send({ error: `Post is already ${draft.status}`, post: draft });
@@ -301,12 +293,6 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
 
     if (id !== undefined) {
       if (typeof id !== "string" || !isPostId(id)) return reply.code(400).send({ error: "Invalid post id" });
-      const existing = await posts.get(id);
-      if (!existing) return reply.code(404).send({ error: "Post not found" });
-      if (isEditable(existing.status)) {
-        const textError = textLimitError(targets, changes.text ?? existing.text, changes.platformOverrides ?? existing.platformOverrides);
-        if (textError) return reply.code(400).send({ error: textError });
-      }
       // The content changes and the status transition are applied together, and
       // only from a status that may be queued — a published, cancelled or
       // already claimed post is reported as a conflict instead.
@@ -342,15 +328,6 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     if (!isPostId(request.params.id)) return reply.code(400).send({ error: "Invalid post id" });
     const changes = resolveChanges(asBody(request.body), { allowNoPlatforms: false });
     if (changes instanceof Error) return reply.code(400).send({ error: changes.message });
-    const existing = await posts.get(request.params.id);
-    if (!existing) return reply.code(404).send({ error: "Post not found" });
-    if (isEditable(existing.status)) {
-      const platforms = changes.platforms ?? existing.platforms;
-      if (!platforms.length) return reply.code(400).send({ error: "At least one platform is required" });
-      // Checked for every platform up front, so an over-long text is not published to some platforms and refused by others.
-      const textError = textLimitError(platforms, changes.text ?? existing.text, changes.platformOverrides ?? existing.platformOverrides);
-      if (textError) return reply.code(400).send({ error: textError });
-    }
     const published = await posts.publishNow(request.params.id, postPublisher, changes);
     if (!published) return reply.code(404).send({ error: "Post not found" });
     if (!published.claimed) return reply.code(409).send({ error: `Post is already ${published.post.status}`, post: published.post });

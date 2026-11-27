@@ -19,6 +19,67 @@ beforeEach(async () => {
 const published = async (platform: PlatformId) => ({ platformPostId: `${platform}-1`, publishedAt: new Date() });
 
 describe("Postgres post repository", () => {
+  it.each(["update", "schedule", "publish-platforms", "publish-override"] as const)(
+    "validates the committed state after waiting for a concurrent %s edit",
+    async (operation) => {
+      const post = await posts.create({ text: "short", platforms: ["linkedin"] });
+      const when = new Date(Date.now() + 60_000);
+      let release = () => {};
+      let ready: (pid: number) => void = () => {};
+      const locked = new Promise<number>((resolve) => { ready = resolve; });
+      const hold = new Promise<void>((resolve) => { release = resolve; });
+      const concurrent = prisma.$transaction(async (tx) => {
+        const [{ pid }] = await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+        await tx.post.update({
+          where: { id: post.id },
+          data: operation === "update"
+            ? { status: "SCHEDULED", scheduledFor: when }
+            : operation === "schedule"
+              ? { content: "x".repeat(3001) }
+              : operation === "publish-platforms"
+                ? { platforms: [] }
+                : { platformOverrides: { linkedin: { text: "x".repeat(3001) } } },
+        });
+        ready(pid);
+        await hold;
+      });
+      const pid = await locked;
+      const publish = vi.fn(published);
+      const mutation = operation === "update"
+        ? posts.update(post.id, { platforms: [] })
+        : operation === "schedule"
+          ? posts.schedule(post.id, when, { platforms: ["linkedin"] })
+          : posts.publishNow(post.id, { publish });
+      const outcome = mutation.then(() => undefined, (error: unknown) => error);
+      try {
+        const deadline = Date.now() + 3000;
+        let blocked = false;
+        while (Date.now() < deadline) {
+          const rows = await prisma.$queryRaw<{ blocked: boolean }[]>`
+            SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE ${pid} = ANY(pg_blocking_pids(pid))) AS blocked
+          `;
+          if (rows[0].blocked) {
+            blocked = true;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(blocked).toBe(true);
+      } finally {
+        release();
+        await concurrent;
+      }
+      expect(await outcome).toBeInstanceOf(Error);
+      expect(publish).not.toHaveBeenCalled();
+      const current = await posts.get(post.id);
+      expect(current?.status).toBe(operation === "update" ? "scheduled" : "draft");
+      if (operation === "update") expect(current?.platforms).toEqual(["linkedin"]);
+      if (operation === "publish-platforms") expect(current?.platforms).toEqual([]);
+      if (operation === "schedule") expect(current?.text).toHaveLength(3001);
+      if (operation === "publish-override") expect(current?.platformOverrides?.linkedin?.text).toHaveLength(3001);
+    },
+  );
+
   it("publishes a draft now, recording one attempt per platform", async () => {
     const draft = await posts.create({ text: "hello", platforms: ["linkedin", "facebook"] });
     const publish = vi.fn(published);
@@ -93,6 +154,15 @@ describe("Postgres post repository", () => {
     expect(publish.mock.calls[0]?.[1].perPlatformOverrides).toEqual({ linkedin: { text: "For LinkedIn" } });
     const cleared = await posts.create({ text: "x", platformOverrides: { facebook: { text: "y" } } });
     expect(await posts.update(cleared.id, { platformOverrides: {} })).not.toHaveProperty("platformOverrides");
+  });
+
+  it("validates and publishes the merged override in the claim", async () => {
+    const draft = await posts.create({ text: "x".repeat(3001), platforms: ["linkedin"] });
+    const publish = vi.fn(published);
+    const result = await posts.publishNow(draft.id, { publish }, { platformOverrides: { linkedin: { text: "short" } } });
+
+    expect(result?.post).toMatchObject({ status: "published", platformOverrides: { linkedin: { text: "short" } } });
+    expect(publish.mock.calls[0]?.[1].perPlatformOverrides).toEqual({ linkedin: { text: "short" } });
   });
 
   it("returns undefined for an unknown id", async () => {

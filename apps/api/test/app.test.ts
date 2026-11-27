@@ -28,6 +28,39 @@ async function setup(options: { env?: Record<string, string>; posts?: PostReposi
   });
 }
 
+describe("concurrent post validation", () => {
+  it.each(["update", "schedule", "publish"] as const)("validates the latest state at %s and returns 400", async (operation) => {
+    const repository = createMemoryPostRepository();
+    const post = await repository.create({ text: "short", platforms: ["linkedin"] });
+    const when = new Date(Date.now() + 60_000);
+    const posts: PostRepository = {
+      ...repository,
+      async update(id, changes) {
+        await repository.schedule(id, when);
+        return repository.update(id, changes);
+      },
+      async schedule(id, scheduledFor, changes) {
+        await repository.update(id, { text: "x".repeat(3001) });
+        return repository.schedule(id, scheduledFor, changes);
+      },
+      async publishNow(id, publisher, changes) {
+        await repository.update(id, { platforms: [] });
+        return repository.publishNow(id, publisher, changes);
+      },
+    };
+    const app = await setup({ posts });
+    const response = operation === "update"
+      ? await app.inject({ method: "POST", url: `/drafts/${post.id}`, headers: auth, payload: { platforms: [] } })
+      : operation === "schedule"
+        ? await app.inject({ method: "POST", url: "/schedule", headers: auth, payload: { id: post.id, platforms: ["linkedin"], scheduledFor: when.toISOString() } })
+        : await app.inject({ method: "POST", url: `/posts/${post.id}/publish`, headers: auth, payload: {} });
+
+    expect(response.statusCode).toBe(400);
+    expect((await repository.get(post.id))?.status).toBe(operation === "update" ? "scheduled" : "draft");
+    await app.close();
+  });
+});
+
 describe("authentication", () => {
   it("accepts the admin token or a session minted from it", async () => {
     const app = await setup();
